@@ -46,12 +46,11 @@ private final class AppController: NSObject, NSApplicationDelegate {
     private let playback = Playback(preview: CommandLine.arguments.contains("--demo"))
     private let notch = PlayerPanel(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel],
                                     backing: .buffered, defer: false)
-    private lazy var lockCard = makeLockCard()
+    private var lockCard: PlayerPanel?
+    private var previewCard: PlayerPanel?
     private lazy var lockSpace = LockScreenSpace()
     private var statusItem: NSStatusItem?
     private var hoverView: HoverView?
-    private var lockView: LockHostingView?
-    private var lockViewIsPreview = false
     private var expanded = false
     private let notchHover = NotchHover()
     private var isLocked = false
@@ -60,7 +59,8 @@ private final class AppController: NSObject, NSApplicationDelegate {
     private var lockPreview = false
     private var lockEnabled = UserDefaults.standard.object(forKey: "lockEnabled") as? Bool ?? true
     private var lockPoll: Timer?
-    private var lockReorder: DispatchWorkItem?
+    private var lockPresentationTask: Task<Void, Never>?
+    private var lockStartedAt: ContinuousClock.Instant?
     private var globalClickMonitor: Any?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -87,7 +87,7 @@ private final class AppController: NSObject, NSApplicationDelegate {
             }
         }
         lockPoll = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.reconcileLock() }
+            Task { @MainActor in self?.checkLockPresentation() }
         }
         playback.didUpdate = { [weak self] in self?.updateLockCard() }
         reconcileLock()
@@ -95,11 +95,13 @@ private final class AppController: NSObject, NSApplicationDelegate {
         playback.start()
     }
 
-    private func makeLockCard() -> PlayerPanel {
+    private func makeLockCard(preview: Bool) -> PlayerPanel {
         let panel = PlayerPanel(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel],
                                 backing: .buffered, defer: false)
-        configure(panel, level: NSWindow.Level(rawValue: Int(CGShieldingWindowLevel()) + 1))
-        panel.hasShadow = true
+        let shielding = NSWindow.Level(rawValue: Int(CGShieldingWindowLevel()))
+        configure(panel, level: preview ? .floating : shielding)
+        panel.canBecomeVisibleWithoutLogin = !preview
+        panel.isReleasedWhenClosed = false
         return panel
     }
 
@@ -132,8 +134,8 @@ private final class AppController: NSObject, NSApplicationDelegate {
         let right = screen.auxiliaryTopRightArea?.width ?? 0
         let cameraWidth = left > 0 && right > 0 ? screen.frame.width - left - right : 180
         let center = left > 0 && right > 0 ? screen.frame.minX + left + cameraWidth / 2 : screen.frame.midX
-        let width = expanded ? min(380, screen.frame.width - 24) : (floating ? 132 : cameraWidth + 64)
-        let height = topHeight + (expanded ? 112 : 0)
+        let width = expanded ? min(390, screen.frame.width - 24) : (floating ? 132 : cameraWidth + 64)
+        let height = topHeight + (expanded ? 140 : 0)
         let top = floating ? screen.visibleFrame.maxY - 5 : screen.frame.maxY
         let frame = CGRect(x: center - width / 2, y: top - height, width: width, height: height)
         let view = NotchView(playback: playback, topHeight: topHeight, floating: floating,
@@ -169,54 +171,73 @@ private final class AppController: NSObject, NSApplicationDelegate {
         renderNotch(animated: animated)
     }
 
-    private func updateLockCard() {
+    private func updateLockCard(reassert: Bool = false) {
         let preview = lockPreview && !isLocked
-        guard screenAwake, sessionActive, let screen = preferredScreen,
-              preview || (lockEnabled && isLocked && playback.track != nil) else {
-            if lockView != nil, lockCard.isVisible {
+        if !preview { previewCard?.orderOut(nil) }
+        let shouldShowOnLock = isLocked && lockEnabled && playback.track != nil
+            && (sessionActive || sessionOnConsole)
+        guard screenAwake, let screen = NSScreen.screens.first,
+              (preview && sessionActive) || shouldShowOnLock else {
+            if let lockCard, lockCard.isVisible {
                 lockCard.orderOut(nil)
-                if !lockViewIsPreview { lockSpace?.hide() }
+                lockSpace?.hide()
             }
+            previewCard?.orderOut(nil)
             return
         }
 
-        let width = min(430, screen.frame.width - 32)
-        let height: CGFloat = preview ? 146 : 124
+        let existing = preview ? previewCard : lockCard
+        let panel = existing ?? makeLockCard(preview: preview)
+        if preview {
+            previewCard = panel
+        } else {
+            lockCard = panel
+        }
+
+        let width = min(376, screen.frame.width - 32)
+        let artSize: CGFloat = screen.frame.height >= 820 ? 152 : 110
+        let height = artSize + (preview ? 156 : 136)
         let frame = CGRect(x: screen.frame.midX - width / 2, y: screen.frame.midY - height / 2,
                            width: width, height: height)
-        if lockViewIsPreview != preview {
-            lockCard.orderOut(nil)
-            if !lockViewIsPreview, lockView != nil { lockSpace?.hide() }
-            lockCard = makeLockCard()
-            lockView = nil
-        }
-        if lockView == nil {
-            let hosting = LockHostingView(rootView: LockCard(playback: playback, preview: preview, artwork: LockArtwork()))
+        if panel.contentView == nil || panel.frame.height != frame.height {
+            let hosting = LockHostingView(rootView: LockCard(playback: playback, preview: preview,
+                                                             artSize: artSize, artwork: LockArtwork()))
             hosting.sizingOptions = []
-            lockCard.contentView = hosting
-            lockView = hosting
-            lockViewIsPreview = preview
+            panel.contentView = hosting
         }
-        lockCard.canBecomeVisibleWithoutLogin = !preview
-        lockCard.level = preview ? .floating : NSWindow.Level(rawValue: Int(CGShieldingWindowLevel()) + 1)
-        if frame != lockCard.frame { lockCard.setFrame(frame, display: true) }
-        if !lockCard.isVisible {
-            lockCard.orderFrontRegardless()
-            if !preview { lockSpace?.show(lockCard) }
+        if frame != panel.frame { panel.setFrame(frame, display: true) }
+        if reassert || !panel.isVisible {
+            if !preview { lockSpace?.show(panel) }
+            panel.orderFrontRegardless()
         }
+    }
+
+    private var sessionOnConsole: Bool {
+        let session = CGSessionCopyCurrentDictionary() as? [String: Any]
+        return session?["kCGSSessionOnConsoleKey"] as? Bool == true
     }
 
     private func reconcileLock() {
         guard let session = CGSessionCopyCurrentDictionary() as? [String: Any] else { return }
-        setLocked(session["CGSSessionScreenIsLocked"] as? Bool ?? false)
+        let locked = session["CGSSessionScreenIsLocked"] as? Bool ?? false
+        // The distributed lock notification can arrive before the session dictionary changes.
+        if !locked, let lockStartedAt, lockStartedAt.duration(to: .now) < .seconds(2) { return }
+        setLocked(locked)
+    }
+
+    private func checkLockPresentation() {
+        reconcileLock()
+        if isLocked { updateLockCard(reassert: true) }
     }
 
     private func setLocked(_ locked: Bool) {
         guard locked != isLocked else { return }
         isLocked = locked
+        lockStartedAt = locked ? .now : nil
         if locked {
             lockPreview = false
             closeNotch(animated: false)
+            playback.refresh()
         } else {
             renderNotch()
         }
@@ -226,16 +247,16 @@ private final class AppController: NSObject, NSApplicationDelegate {
     }
 
     private func refreshLockPresentation() {
-        lockReorder?.cancel()
-        guard isLocked, screenAwake, sessionActive else { return }
-        // WindowServer can finish switching to the lock screen after the notification arrives.
-        let reorder = DispatchWorkItem { [weak self] in
-            guard let self, self.isLocked, self.lockCard.isVisible else { return }
-            self.lockCard.orderFrontRegardless()
-            self.lockSpace?.show(self.lockCard)
+        lockPresentationTask?.cancel()
+        guard isLocked, screenAwake else { return }
+        // WindowServer may rebuild the set of visible spaces after lock and display wake.
+        lockPresentationTask = Task { [weak self] in
+            for delay in [120, 300, 650, 1000] {
+                do { try await Task.sleep(for: .milliseconds(delay)) } catch { return }
+                guard let self, self.isLocked, self.screenAwake else { return }
+                self.updateLockCard(reassert: true)
+            }
         }
-        lockReorder = reorder
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.65, execute: reorder)
     }
 
     @objc private func didLock() { setLocked(true) }
@@ -243,6 +264,7 @@ private final class AppController: NSObject, NSApplicationDelegate {
     @objc private func screenChanged() {
         renderNotch()
         updateLockCard()
+        refreshLockPresentation()
     }
 
     @objc private func screenDidSleep() {
@@ -254,11 +276,11 @@ private final class AppController: NSObject, NSApplicationDelegate {
         screenAwake = true
         reconcileLock()
         screenChanged()
-        refreshLockPresentation()
     }
 
     @objc private func sessionDidResign() {
         sessionActive = false
+        reconcileLock()
         screenChanged()
     }
 
@@ -266,7 +288,6 @@ private final class AppController: NSObject, NSApplicationDelegate {
         sessionActive = true
         reconcileLock()
         screenChanged()
-        refreshLockPresentation()
     }
 
     @objc private func toggleLockPreview() {

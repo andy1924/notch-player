@@ -6,8 +6,8 @@
 An open-source macOS Dynamic Island for Spotify and Apple Music. See what's playing in your MacBook's notch, control playback, and show a spinning record on the lock screen.
 
 - **MacBook notch player** — hover to highlight, click to expand or collapse, or use the floating pill on displays without a notch.
-- **Now Playing** — see album art, track details, and playback progress, with play, pause, and skip controls.
-- **Lock-screen player** — click the spinning record to switch to the album cover. Use **Preview Lock Screen** in the menu bar to try the card on your desktop.
+- **Now Playing** — see album art, track details, and playback progress, with play, pause, previous, and next controls. Drag the timeline to seek, or click the album cover to open the active music app.
+- **Lock-screen player** — a spinning record above a glass playback card with track controls and a scrubber. Click the record to switch to the album cover. Use **Preview Lock Screen** in the menu bar to try the card on your desktop.
 
 ## Build and run
 
@@ -22,7 +22,7 @@ open "dist/Notch Player.app"
 
 Play a track in the Spotify or Music desktop app and allow the macOS Automation prompt. Use the record icon in the menu bar to open the notch player, change lock-screen options, or quit. Spotify album covers load from Spotify's artwork URLs.
 
-To try the interface with sample data, quit the app and reopen it in demo mode.
+To try the interface with sample tracks, quit the app and reopen it in demo mode.
 
 ```sh
 open "dist/Notch Player.app" --args --demo
