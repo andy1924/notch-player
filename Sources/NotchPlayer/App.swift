@@ -53,7 +53,7 @@ private final class AppController: NSObject, NSApplicationDelegate {
     private var lockView: LockHostingView?
     private var lockViewIsPreview = false
     private var expanded = false
-    private var pinned = false
+    private let notchHover = NotchHover()
     private var isLocked = false
     private var screenAwake = true
     private var sessionActive = true
@@ -61,7 +61,6 @@ private final class AppController: NSObject, NSApplicationDelegate {
     private var lockEnabled = UserDefaults.standard.object(forKey: "lockEnabled") as? Bool ?? true
     private var lockPoll: Timer?
     private var lockReorder: DispatchWorkItem?
-    private var pendingCollapse: DispatchWorkItem?
     private var globalClickMonitor: Any?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -83,7 +82,7 @@ private final class AppController: NSObject, NSApplicationDelegate {
                                                name: NSApplication.didChangeScreenParametersNotification, object: nil)
         globalClickMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
             Task { @MainActor in
-                guard let self, self.pinned, !self.notch.frame.contains(NSEvent.mouseLocation) else { return }
+                guard let self, self.expanded, !self.notch.frame.contains(NSEvent.mouseLocation) else { return }
                 self.closeNotch()
             }
         }
@@ -120,8 +119,9 @@ private final class AppController: NSObject, NSApplicationDelegate {
         NSScreen.screens.first { $0.safeAreaInsets.top > 0 } ?? NSScreen.screens.first
     }
 
-    private func renderNotch() {
+    private func renderNotch(animated: Bool = false) {
         guard !isLocked, sessionActive, screenAwake, let screen = preferredScreen else {
+            notchHover.isHighlighted = false
             notch.orderOut(nil)
             return
         }
@@ -137,52 +137,36 @@ private final class AppController: NSObject, NSApplicationDelegate {
         let top = floating ? screen.visibleFrame.maxY - 5 : screen.frame.maxY
         let frame = CGRect(x: center - width / 2, y: top - height, width: width, height: height)
         let view = NotchView(playback: playback, topHeight: topHeight, floating: floating,
-                             expanded: expanded, toggle: { [weak self] in self?.toggleNotch() })
+                             expanded: expanded, hover: notchHover, toggle: { [weak self] in self?.toggleNotch() })
         if let hoverView {
             hoverView.rootView = view
         } else {
             let hosting = HoverView(rootView: view)
             hosting.sizingOptions = []
-            hosting.hoverChanged = { [weak self] inside in self?.hoverChanged(inside) }
+            hosting.hoverChanged = { [weak self] inside in self?.notchHover.isHighlighted = inside }
             notch.contentView = hosting
             hoverView = hosting
         }
-        notch.setFrame(frame, display: true)
+        if animated, notch.isVisible, !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = 0.26
+                context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+                notch.animator().setFrame(frame, display: true)
+            }
+        } else {
+            notch.setFrame(frame, display: true)
+        }
         if !notch.isVisible { notch.orderFrontRegardless() }
     }
 
-    private func hoverChanged(_ inside: Bool) {
-        pendingCollapse?.cancel()
-        guard !pinned else { return }
-        if inside, !expanded {
-            expanded = true
-            renderNotch()
-        } else if !inside, expanded {
-            let collapse = DispatchWorkItem { [weak self] in
-                guard let self, !self.pinned, !self.notch.frame.contains(NSEvent.mouseLocation) else { return }
-                self.closeNotch()
-            }
-            pendingCollapse = collapse
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.22, execute: collapse)
-        }
-    }
-
     private func toggleNotch() {
-        if pinned {
-            closeNotch()
-        } else {
-            pendingCollapse?.cancel()
-            pinned = true
-            expanded = true
-            renderNotch()
-        }
+        expanded.toggle()
+        renderNotch(animated: true)
     }
 
-    private func closeNotch() {
-        pendingCollapse?.cancel()
-        pinned = false
+    private func closeNotch(animated: Bool = true) {
         expanded = false
-        renderNotch()
+        renderNotch(animated: animated)
     }
 
     private func updateLockCard() {
@@ -232,7 +216,7 @@ private final class AppController: NSObject, NSApplicationDelegate {
         isLocked = locked
         if locked {
             lockPreview = false
-            closeNotch()
+            closeNotch(animated: false)
         } else {
             renderNotch()
         }
@@ -299,9 +283,9 @@ private final class AppController: NSObject, NSApplicationDelegate {
     }
 
     @objc private func showNotch() {
-        pinned = true
+        guard !expanded else { return }
         expanded = true
-        renderNotch()
+        renderNotch(animated: true)
     }
 
     private func buildMenu() {

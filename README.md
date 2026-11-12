@@ -5,7 +5,7 @@
 
 An open-source macOS Dynamic Island for Spotify and Apple Music. See what's playing in your MacBook's notch, control playback, and show a spinning record on the lock screen.
 
-- **MacBook notch player** — hover to expand, click to pin, or use the floating pill on displays without a notch.
+- **MacBook notch player** — hover to highlight, click to expand or collapse, or use the floating pill on displays without a notch.
 - **Now Playing** — see album art, track details, and playback progress, with play, pause, and skip controls.
 - **Lock-screen player** — click the spinning record to switch to the album cover. Use **Preview Lock Screen** in the menu bar to try the card on your desktop.
 

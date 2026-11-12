@@ -2,11 +2,17 @@ import SwiftUI
 
 struct NotchShape: Shape {
     let floating: Bool
+    var expansion: CGFloat
+
+    var animatableData: CGFloat {
+        get { expansion }
+        set { expansion = newValue }
+    }
 
     func path(in rect: CGRect) -> Path {
-        if floating { return RoundedRectangle(cornerRadius: 22).path(in: rect) }
-        let shoulder: CGFloat = 6
-        let radius = min(21, rect.height * 0.5)
+        let radius = min(21 + 9 * expansion, rect.height * 0.5)
+        if floating { return RoundedRectangle(cornerRadius: radius, style: .continuous).path(in: rect) }
+        let shoulder = 6 + 6 * expansion
         let left = shoulder
         let right = rect.maxX - shoulder
         var path = Path()
@@ -26,22 +32,34 @@ struct NotchShape: Shape {
     }
 }
 
+final class NotchHover: ObservableObject {
+    @Published var isHighlighted = false
+}
+
 struct NotchView: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @ObservedObject var playback: Playback
     let topHeight: CGFloat
     let floating: Bool
     let expanded: Bool
+    @ObservedObject var hover: NotchHover
     let toggle: () -> Void
 
     var body: some View {
+        let shape = NotchShape(floating: floating, expansion: expanded ? 1 : 0)
         VStack(spacing: 0) {
             Button(action: toggle) {
                 HStack {
-                    if playback.track != nil {
+                    if expanded {
+                        Spacer()
+                        Image(systemName: "chevron.up")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(.white.opacity(0.55))
+                    } else if playback.track != nil {
                         CoverView(playback: playback, size: 18)
                         Spacer()
                         Equalizer(playing: playback.track?.playing == true)
-                    } else if floating || expanded {
+                    } else if floating {
                         Spacer()
                         Image(systemName: "waveform")
                             .font(.system(size: 12, weight: .semibold))
@@ -51,12 +69,14 @@ struct NotchView: View {
                         Color.clear
                     }
                 }
-                .padding(.horizontal, 11)
+                .transition(.identity)
+                .padding(.horizontal, expanded ? 20 : 11)
+                .frame(maxWidth: .infinity)
                 .frame(height: topHeight)
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .accessibilityLabel("Toggle pinned notch player")
+            .accessibilityLabel(expanded ? "Collapse notch player" : "Expand notch player")
 
             if expanded {
                 if let track = playback.track {
@@ -72,6 +92,7 @@ struct NotchView: View {
                     .padding(.horizontal, 19)
                     .padding(.top, 12)
                     .padding(.bottom, 18)
+                    .transition(.opacity)
                 } else {
                     VStack(spacing: 6) {
                         Text(playback.unavailable ? "Music access unavailable" : "Nothing playing")
@@ -86,11 +107,21 @@ struct NotchView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .padding(.horizontal, 24)
                     .padding(.bottom, 8)
+                    .transition(.opacity)
                 }
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-        .background(.black, in: NotchShape(floating: floating))
+        .background {
+            shape.fill(.black)
+                .overlay {
+                    shape.fill(.white)
+                        .opacity(hover.isHighlighted && !expanded ? 0.09 : 0)
+                        .animation(reduceMotion ? nil : .easeOut(duration: 0.16), value: hover.isHighlighted)
+                }
+        }
+        .clipShape(shape)
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.26), value: expanded)
         .preferredColorScheme(.dark)
         .foregroundStyle(.white)
     }
