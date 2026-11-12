@@ -6,8 +6,9 @@ final class LockScreenSpace {
     private typealias GetConnection = @convention(c) () -> Int32
     private typealias CreateSpace = @convention(c) (Int32, Int32, Int32) -> Int32
     private typealias SetLevel = @convention(c) (Int32, Int32, Int32) -> Int32
-    private typealias SetVisibility = @convention(c) (Int32, CFArray) -> Int32
-    private typealias MoveWindow = @convention(c) (Int32, Int32, CFArray, Int32) -> Int32
+    // These calls do not expose a reliable status, including on macOS 27.
+    private typealias SetVisibility = @convention(c) (Int32, CFArray) -> Void
+    private typealias MoveWindow = @convention(c) (Int32, Int32, CFArray, Int32) -> Void
 
     private let library: UnsafeMutableRawPointer
     private let connection: Int32
@@ -50,12 +51,14 @@ final class LockScreenSpace {
     @MainActor
     func show(_ window: NSWindow) {
         let number = window.windowNumber
-        guard number > 0, showSpaces(connection, [space] as CFArray) == 0 else { return }
-        if moveWindow(connection, space, [number] as CFArray, 7) != 0 { hide() }
+        guard number > 0 else { return }
+        // Both operations may need to be reapplied when display wake rebuilds the visible spaces.
+        showSpaces(connection, [space] as CFArray)
+        moveWindow(connection, space, [number] as CFArray, 7)
     }
 
     func hide() {
-        _ = hideSpaces(connection, [space] as CFArray)
+        hideSpaces(connection, [space] as CFArray)
     }
 
     deinit {

@@ -24,9 +24,9 @@ struct Track: Decodable {
 }
 
 enum PlaybackCommand: String {
-    case previous = "previousTrack"
-    case toggle = "playpause"
-    case next = "nextTrack"
+    case previous
+    case toggle
+    case next
 }
 
 private enum PlayerScript {
@@ -34,14 +34,21 @@ private enum PlayerScript {
     function run(argv) {
         const app = Application(argv[0]);
         if (!app.running()) return "null";
-        if (argv[1] !== "read") {
-            app[argv[1]]();
-            return "";
+        switch (argv[1]) {
+        case "previous": app.previousTrack(); break;
+        case "toggle": app.playpause(); break;
+        case "next": app.nextTrack(); break;
+        case "seek": app.playerPosition = Number(argv[3]); break;
+        case "read": return readTrack(app, argv[2] === "com.spotify.client");
+        default: throw new Error("Unknown playback action");
         }
+        return "";
+    }
+
+    function readTrack(app, spotify) {
 
         const state = app.playerState();
         if (state !== "playing" && state !== "paused") return "null";
-        const spotify = argv[2] === "com.spotify.client";
         const track = app.currentTrack();
         const optional = (get, fallback) => {
             try { return get() ?? fallback; } catch (_) { return fallback; }
@@ -59,8 +66,9 @@ private enum PlayerScript {
     }
     """
 
-    static func run(_ player: Player, path: String, action: String) -> Data? {
-        execute(["-l", "JavaScript", "-e", source, path, action, player.rawValue])
+    static func run(_ player: Player, path: String, action: String, position: Double? = nil) -> Data? {
+        let arguments = ["-l", "JavaScript", "-e", source, path, action, player.rawValue]
+        return execute(arguments + (position.map { [String($0)] } ?? []))
     }
 
     static func musicArtwork(id: String) -> Data? {
@@ -129,21 +137,28 @@ final class Playback: ObservableObject {
     @Published private(set) var player: Player?
     @Published private(set) var artwork: NSImage?
     @Published private(set) var unavailable = false
+    @Published private(set) var controlError: String?
     let preview: Bool
     var didUpdate: (() -> Void)?
 
     private let scripts = DispatchQueue(label: "local.notchplayer.playback")
     private var timer: Timer?
     private var refreshInFlight = false
+    private var lastSuccessfulSample = ContinuousClock.now
     private var artTask: Task<Void, Never>?
     private var sampledAt = ContinuousClock.now
+    private var demoIndex = 0
+    private let demoTracks = [
+        (title: "Night Drive", duration: 234.0),
+        (title: "Blue Hour", duration: 201.0),
+        (title: "First Light", duration: 246.0)
+    ]
 
     init(preview: Bool) {
         self.preview = preview
         if preview {
             player = .music
-            track = Track(id: "preview", title: "Night Drive", artist: "Notch Player Demo",
-                          duration: 234, position: 72, playing: true, artworkURL: "")
+            updateDemo(position: 72, playing: true)
         }
     }
 
@@ -165,19 +180,62 @@ final class Playback: ObservableObject {
 
     func send(_ command: PlaybackCommand) {
         if preview, let track {
-            let position = command == .toggle ? self.position() : 0
-            self.track = Track(id: track.id, title: track.title, artist: track.artist,
-                               duration: track.duration, position: position,
-                               playing: command == .toggle ? !track.playing : track.playing,
-                               artworkURL: "")
-            sampledAt = .now
-            didUpdate?()
+            switch command {
+            case .previous:
+                demoIndex = (demoIndex + demoTracks.count - 1) % demoTracks.count
+                updateDemo(position: 0, playing: track.playing)
+            case .next:
+                demoIndex = (demoIndex + 1) % demoTracks.count
+                updateDemo(position: 0, playing: track.playing)
+            case .toggle:
+                updateDemo(position: position(), playing: !track.playing)
+            }
             return
         }
+        perform(command.rawValue)
+    }
+
+    func seek(to position: Double) {
+        guard let track, track.duration.isFinite, track.duration > 0, position.isFinite else { return }
+        let target = min(max(0, position), track.duration)
+        if preview {
+            updateDemo(position: target, playing: track.playing)
+        } else {
+            perform("seek", position: target)
+        }
+    }
+
+    func openPlayer() {
+        guard !preview, let player else { return }
+        guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: player.rawValue) else {
+            controlError = "Couldn’t find \(player.name)."
+            return
+        }
+        controlError = nil
+        NSWorkspace.shared.openApplication(at: url, configuration: .init()) { [weak self] _, error in
+            guard error != nil else { return }
+            Task { @MainActor in self?.controlError = "Couldn’t open \(player.name)." }
+        }
+    }
+
+    private func updateDemo(position: Double, playing: Bool) {
+        let demo = demoTracks[demoIndex]
+        track = Track(id: "preview-\(demoIndex)", title: demo.title, artist: "Notch Player Demo",
+                      duration: demo.duration, position: position, playing: playing, artworkURL: "")
+        sampledAt = .now
+        didUpdate?()
+    }
+
+    private func perform(_ action: String, position: Double? = nil) {
         guard let player, let path = player.runningPath else { return }
+        controlError = nil
         scripts.async { [weak self] in
-            _ = PlayerScript.run(player, path: path, action: command.rawValue)
-            Task { @MainActor in self?.refresh() }
+            let success = PlayerScript.run(player, path: path, action: action, position: position) != nil
+            Task { @MainActor in
+                guard let self else { return }
+                if !success, self.player == player { self.controlError = "Couldn’t control \(player.name)." }
+                self.refresh()
+            }
         }
     }
 
@@ -190,10 +248,10 @@ final class Playback: ObservableObject {
         }
         scripts.async { [weak self] in
             var candidates: [(Player, Track, ContinuousClock.Instant)] = []
-            var failed = false
+            var failed: Set<Player> = []
             for (player, path) in running {
                 guard let data = PlayerScript.run(player, path: path, action: "read") else {
-                    failed = true
+                    failed.insert(player)
                     continue
                 }
                 do {
@@ -201,17 +259,22 @@ final class Playback: ObservableObject {
                         candidates.append((player, track, .now))
                     }
                 } catch {
-                    failed = true
+                    failed.insert(player)
                 }
             }
             let active = candidates.filter { $0.1.playing }
             let available = active.isEmpty ? candidates : active
             let selected = available.first { $0.0 == currentPlayer } ?? available.first
-            let unavailable = failed && selected == nil
             Task { @MainActor in
                 guard let self else { return }
                 self.refreshInFlight = false
-                self.unavailable = unavailable
+                // A brief Automation failure during display lock or wake should not remove the player.
+                if selected == nil, let currentPlayer, failed.contains(currentPlayer),
+                   self.track != nil, self.lastSuccessfulSample.duration(to: .now) < .seconds(8) {
+                    return
+                }
+                self.unavailable = !failed.isEmpty && selected == nil
+                if selected != nil { self.lastSuccessfulSample = .now }
                 self.apply(selected)
             }
         }
@@ -224,6 +287,7 @@ final class Playback: ObservableObject {
         track = selection?.1
         sampledAt = selection?.2 ?? .now
         if changed {
+            controlError = nil
             artTask?.cancel()
             artwork = nil
             if let (player, track, _) = selection { loadArtwork(player, track) }
