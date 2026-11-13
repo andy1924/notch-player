@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 struct NotchShape: Shape {
@@ -38,45 +39,48 @@ final class NotchHover: ObservableObject {
 
 struct NotchView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
     @ObservedObject var playback: Playback
     let topHeight: CGFloat
     let floating: Bool
     let expanded: Bool
     @ObservedObject var hover: NotchHover
-    let toggle: () -> Void
+    let open: () -> Void
+    let dragArtwork: (CGPoint, Bool) -> Void
 
     var body: some View {
         let shape = NotchShape(floating: floating, expansion: expanded ? 1 : 0)
         VStack(spacing: 0) {
-            Button(action: toggle) {
-                HStack {
-                    if expanded {
-                        Spacer()
-                        Image(systemName: "chevron.up")
-                            .font(.system(size: 10, weight: .semibold))
-                            .foregroundStyle(.white.opacity(0.55))
-                    } else if playback.track != nil {
-                        CoverView(playback: playback, size: 18)
-                        Spacer()
-                        Equalizer(playing: playback.track?.playing == true)
-                    } else if floating {
-                        Spacer()
-                        Image(systemName: "waveform")
-                            .font(.system(size: 12, weight: .semibold))
-                            .foregroundStyle(.white.opacity(0.5))
-                        Spacer()
-                    } else {
-                        Color.clear
+            if expanded {
+                Color.clear
+                    .frame(height: topHeight)
+                    .accessibilityHidden(true)
+            } else {
+                Button(action: open) {
+                    HStack {
+                        if playback.track != nil {
+                            CoverView(playback: playback, size: 18)
+                            Spacer()
+                            Equalizer(playing: playback.track?.playing == true)
+                        } else if floating {
+                            Spacer()
+                            Image(systemName: "waveform")
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundStyle(.white.opacity(0.5))
+                            Spacer()
+                        } else {
+                            Color.clear
+                        }
                     }
+                    .padding(.horizontal, 11)
+                    .frame(maxWidth: .infinity)
+                    .frame(height: topHeight)
+                    .contentShape(Rectangle())
                 }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Expand notch player")
                 .transition(.identity)
-                .padding(.horizontal, expanded ? 20 : 11)
-                .frame(maxWidth: .infinity)
-                .frame(height: topHeight)
-                .contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
-            .accessibilityLabel(expanded ? "Collapse notch player" : "Expand notch player")
 
             if expanded {
                 if let track = playback.track {
@@ -88,7 +92,7 @@ struct NotchView: View {
                         }
                         ProgressViewRow(playback: playback, seekable: true)
                             .id((playback.player?.rawValue ?? "") + track.id)
-                        PlaybackControls(playback: playback, prominent: true)
+                        PlaybackControls(playback: playback, prominent: true, showsButtonBackgrounds: false)
                     }
                     .padding(.horizontal, 24)
                     .padding(.top, 3)
@@ -113,18 +117,39 @@ struct NotchView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-        .background {
-            shape.fill(.black)
-                .overlay {
-                    shape.fill(.white)
-                        .opacity(hover.isHighlighted && !expanded ? 0.09 : 0)
-                        .animation(reduceMotion ? nil : .easeOut(duration: 0.16), value: hover.isHighlighted)
-                }
-        }
         .clipShape(shape)
+        .background { surface(in: shape) }
+        .overlay {
+            shape.fill(.white)
+                .opacity(hover.isHighlighted && !expanded ? 0.035 : 0)
+                .allowsHitTesting(false)
+                .animation(reduceMotion ? nil : .easeOut(duration: 0.16), value: hover.isHighlighted)
+        }
         .animation(reduceMotion ? nil : .easeInOut(duration: 0.26), value: expanded)
         .preferredColorScheme(.dark)
         .foregroundStyle(.white)
+    }
+
+    private func surface(in shape: NotchShape) -> some View {
+        shape.fill(.black)
+            .overlay {
+                if !reduceTransparency {
+                    glassRim(in: shape)
+                }
+            }
+            .allowsHitTesting(false)
+    }
+
+    @ViewBuilder
+    private func glassRim(in shape: NotchShape) -> some View {
+        #if compiler(>=6.2)
+        if #available(macOS 26.0, *) {
+            Color.clear
+                .glassEffect(.regular, in: shape)
+                .mask { shape.stroke(lineWidth: 1.5) }
+                .opacity(hover.isHighlighted ? 0.56 : 0.30)
+        }
+        #endif
     }
 
     private var artworkButton: some View {
@@ -139,14 +164,36 @@ struct NotchView: View {
                 }
         }
         .buttonStyle(PlayerButtonStyle())
-        .disabled(playback.preview)
-        .help(label)
+        .highPriorityGesture(DragGesture(minimumDistance: 10, coordinateSpace: .global)
+            .onChanged { _ in dragArtwork(NSEvent.mouseLocation, false) }
+            .onEnded { _ in dragArtwork(NSEvent.mouseLocation, true) })
+        .help(playback.preview ? "Drag to the desktop" : "\(label) or drag to the desktop")
         .accessibilityLabel(label)
     }
 }
 
 final class LockArtwork: ObservableObject {
-    @Published var showCover = false
+    enum Mode: CaseIterable {
+        case record, cover, lyrics
+
+        var next: Mode {
+            switch self {
+            case .record: .cover
+            case .cover: .lyrics
+            case .lyrics: .record
+            }
+        }
+
+        var label: String {
+            switch self {
+            case .record: "Show record"
+            case .cover: "Show album cover"
+            case .lyrics: "Show lyrics"
+            }
+        }
+    }
+
+    @Published var mode: Mode = .record
 }
 
 struct LockCard: View {
@@ -155,6 +202,7 @@ struct LockCard: View {
     let preview: Bool
     let artSize: CGFloat
     @ObservedObject var artwork: LockArtwork
+    let modeChanged: () -> Void
 
     var body: some View {
         VStack(spacing: 10) {
@@ -164,40 +212,18 @@ struct LockCard: View {
                     .foregroundStyle(.secondary)
             }
             if let track = playback.track {
-                Button {
-                    withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.22)) {
-                        artwork.showCover.toggle()
+                HStack(spacing: 20) {
+                    VStack(spacing: 10) {
+                        artworkButton
+                        controls(for: track)
                     }
-                } label: {
-                    if artwork.showCover {
-                        CoverView(playback: playback, size: artSize)
-                            .transition(.opacity)
-                    } else {
-                        RecordView(playback: playback, size: artSize)
-                            .transition(.opacity)
+                    .frame(width: artwork.mode == .lyrics ? 270 : nil)
+                    if artwork.mode == .lyrics {
+                        LockLyrics(playback: playback, track: track)
+                            .id((playback.player?.rawValue ?? "") + track.id)
+                            .background { surface }
                     }
                 }
-                .buttonStyle(PlayerButtonStyle())
-                .accessibilityLabel(artwork.showCover ? "Show record" : "Show album cover")
-
-                VStack(spacing: 5) {
-                    HStack(spacing: 10) {
-                        TrackLabels(track: track, source: playback.player?.name, prominent: true)
-                        Spacer(minLength: 4)
-                        if let player = playback.player {
-                            Image(systemName: player == .music ? "music.note" : "waveform")
-                                .font(.system(size: 13, weight: .semibold))
-                                .foregroundStyle(.secondary)
-                                .accessibilityLabel(player.name)
-                        }
-                    }
-                    ProgressViewRow(playback: playback, seekable: true)
-                        .id((playback.player?.rawValue ?? "") + track.id)
-                    PlaybackControls(playback: playback, prominent: true)
-                }
-                .padding(.horizontal, 18)
-                .padding(.vertical, 8)
-                .background { surface }
             } else {
                 VStack(spacing: 8) {
                     Image(systemName: "record.circle")
@@ -215,6 +241,47 @@ struct LockCard: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .preferredColorScheme(.dark)
         .foregroundStyle(.white)
+    }
+
+    private var artworkButton: some View {
+        Button {
+            withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.22)) {
+                artwork.mode = artwork.mode.next
+            }
+            modeChanged()
+        } label: {
+            if artwork.mode == .record {
+                RecordView(playback: playback, size: artSize)
+                    .transition(.opacity)
+            } else {
+                CoverView(playback: playback, size: artSize)
+                    .transition(.opacity)
+            }
+        }
+        .buttonStyle(PlayerButtonStyle())
+        .accessibilityLabel(artwork.mode.next.label)
+        .help(artwork.mode.next.label)
+    }
+
+    private func controls(for track: Track) -> some View {
+        VStack(spacing: 5) {
+            HStack(spacing: 10) {
+                TrackLabels(track: track, source: playback.player?.name, prominent: true)
+                Spacer(minLength: 4)
+                if let player = playback.player {
+                    Image(systemName: player == .music ? "music.note" : "waveform")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .accessibilityLabel(player.name)
+                }
+            }
+            ProgressViewRow(playback: playback, seekable: true)
+                .id((playback.player?.rawValue ?? "") + track.id)
+            PlaybackControls(playback: playback, prominent: true)
+        }
+        .padding(.horizontal, 18)
+        .padding(.vertical, 8)
+        .background { surface }
     }
 
     private var surface: some View {
@@ -241,7 +308,7 @@ private struct TrackLabels: View {
     }
 }
 
-private struct CoverView: View {
+struct CoverView: View {
     @ObservedObject var playback: Playback
     let size: CGFloat
 
@@ -264,7 +331,7 @@ private struct CoverView: View {
     }
 }
 
-private struct RecordView: View {
+struct RecordView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @ObservedObject var playback: Playback
     let size: CGFloat
@@ -324,6 +391,7 @@ private struct PlayerButtonStyle: ButtonStyle {
 private struct PlaybackControls: View {
     @ObservedObject var playback: Playback
     var prominent = false
+    var showsButtonBackgrounds = true
 
     var body: some View {
         HStack(spacing: prominent ? 19 : 3) {
@@ -341,8 +409,12 @@ private struct PlaybackControls: View {
                 .font(.system(size: prominent ? (command == .toggle ? 20 : 14) : (command == .toggle ? 15 : 11),
                               weight: .semibold))
                 .frame(width: prominent ? 44 : 26, height: prominent ? 35 : 28)
-                .background(.white.opacity(command == .toggle ? 0.16 : 0.08),
-                            in: RoundedRectangle(cornerRadius: prominent ? 12 : 8))
+                .background {
+                    if showsButtonBackgrounds {
+                        RoundedRectangle(cornerRadius: prominent ? 12 : 8)
+                            .fill(.white.opacity(command == .toggle ? 0.16 : 0.08))
+                    }
+                }
                 .contentShape(Rectangle())
         }
         .buttonStyle(PlayerButtonStyle())

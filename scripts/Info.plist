@@ -8,6 +8,8 @@
     <string>NotchPlayer</string>
     <key>CFBundleName</key>
     <string>Notch Player</string>
+    <key>CFBundleIconFile</key>
+    <string>NotchPlayer.icns</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>

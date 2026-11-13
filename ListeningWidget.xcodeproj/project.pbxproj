@@ -1,0 +1,107 @@
+// !$*UTF8*$!
+{
+    archiveVersion = 1;
+    classes = {};
+    objectVersion = 56;
+    objects = {
+        A10000000000000000000001 = {
+            isa = PBXProject;
+            buildConfigurationList = A1000000000000000000000C;
+            compatibilityVersion = "Xcode 14.0";
+            developmentRegion = en;
+            knownRegions = (en, Base);
+            mainGroup = A10000000000000000000002;
+            productRefGroup = A10000000000000000000003;
+            projectDirPath = "";
+            projectRoot = "";
+            targets = (A10000000000000000000004);
+        };
+        A10000000000000000000002 = {
+            isa = PBXGroup;
+            children = (A10000000000000000000005, A10000000000000000000006, A10000000000000000000003);
+            sourceTree = "<group>";
+        };
+        A10000000000000000000003 = {
+            isa = PBXGroup;
+            children = (A10000000000000000000007);
+            name = Products;
+            sourceTree = "<group>";
+        };
+        A10000000000000000000004 = {
+            isa = PBXNativeTarget;
+            buildConfigurationList = A1000000000000000000000D;
+            buildPhases = (A10000000000000000000008);
+            buildRules = ();
+            dependencies = ();
+            name = ListeningWidget;
+            productName = ListeningWidget;
+            productReference = A10000000000000000000007;
+            productType = "com.apple.product-type.app-extension";
+        };
+        A10000000000000000000005 = {
+            isa = PBXFileReference;
+            lastKnownFileType = sourcecode.swift;
+            path = Sources/ListeningWidget/ListeningWidget.swift;
+            sourceTree = SOURCE_ROOT;
+        };
+        A10000000000000000000006 = {
+            isa = PBXFileReference;
+            lastKnownFileType = sourcecode.swift;
+            path = Sources/NotchPlayer/ListeningHistory.swift;
+            sourceTree = SOURCE_ROOT;
+        };
+        A10000000000000000000007 = {
+            isa = PBXFileReference;
+            explicitFileType = "wrapper.app-extension";
+            includeInIndex = 0;
+            path = ListeningWidget.appex;
+            sourceTree = BUILT_PRODUCTS_DIR;
+        };
+        A10000000000000000000008 = {
+            isa = PBXSourcesBuildPhase;
+            buildActionMask = 2147483647;
+            files = (A10000000000000000000009, A1000000000000000000000A);
+            runOnlyForDeploymentPostprocessing = 0;
+        };
+        A10000000000000000000009 = { isa = PBXBuildFile; fileRef = A10000000000000000000005; };
+        A1000000000000000000000A = { isa = PBXBuildFile; fileRef = A10000000000000000000006; };
+        A1000000000000000000000C = {
+            isa = XCConfigurationList;
+            buildConfigurations = (A1000000000000000000000E);
+            defaultConfigurationIsVisible = 0;
+            defaultConfigurationName = Release;
+        };
+        A1000000000000000000000D = {
+            isa = XCConfigurationList;
+            buildConfigurations = (A1000000000000000000000F);
+            defaultConfigurationIsVisible = 0;
+            defaultConfigurationName = Release;
+        };
+        A1000000000000000000000E = {
+            isa = XCBuildConfiguration;
+            name = Release;
+            buildSettings = {
+                ALWAYS_SEARCH_USER_PATHS = NO;
+                MACOSX_DEPLOYMENT_TARGET = 14.0;
+                SDKROOT = macosx;
+                SWIFT_VERSION = 5.0;
+            };
+        };
+        A1000000000000000000000F = {
+            isa = XCBuildConfiguration;
+            name = Release;
+            buildSettings = {
+                APPLICATION_EXTENSION_API_ONLY = YES;
+                CODE_SIGNING_ALLOWED = NO;
+                ENABLE_DEBUG_DYLIB = NO;
+                GENERATE_INFOPLIST_FILE = NO;
+                INFOPLIST_FILE = "scripts/ListeningWidget-Info.plist";
+                PRODUCT_BUNDLE_IDENTIFIER = local.notchplayer.app.ListeningWidget;
+                PRODUCT_NAME = ListeningWidget;
+                SKIP_INSTALL = YES;
+                SWIFT_OPTIMIZATION_LEVEL = "-O";
+            };
+        };
+    };
+    rootObject = A10000000000000000000001;
+}

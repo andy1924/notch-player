@@ -140,6 +140,8 @@ final class Playback: ObservableObject {
     @Published private(set) var controlError: String?
     let preview: Bool
     var didUpdate: (() -> Void)?
+    var didSampleListening: ((ListeningSource?, Date, ContinuousClock.Instant) -> Void)?
+    var didLoseListeningSample: (() -> Void)?
 
     private let scripts = DispatchQueue(label: "local.notchplayer.playback")
     private var timer: Timer?
@@ -247,7 +249,7 @@ final class Playback: ObservableObject {
             player.runningPath.map { (player, $0) }
         }
         scripts.async { [weak self] in
-            var candidates: [(Player, Track, ContinuousClock.Instant)] = []
+            var candidates: [(Player, Track, ContinuousClock.Instant, Date)] = []
             var failed: Set<Player> = []
             for (player, path) in running {
                 guard let data = PlayerScript.run(player, path: path, action: "read") else {
@@ -256,7 +258,7 @@ final class Playback: ObservableObject {
                 }
                 do {
                     if let track = try JSONDecoder().decode(Track?.self, from: data) {
-                        candidates.append((player, track, .now))
+                        candidates.append((player, track, .now, .now))
                     }
                 } catch {
                     failed.insert(player)
@@ -265,9 +267,18 @@ final class Playback: ObservableObject {
             let active = candidates.filter { $0.1.playing }
             let available = active.isEmpty ? candidates : active
             let selected = available.first { $0.0 == currentPlayer } ?? available.first
+            let sampledAt = ContinuousClock.now
+            let sampledDate = Date.now
             Task { @MainActor in
                 guard let self else { return }
                 self.refreshInFlight = false
+                if let (player, track, tick, date) = selected, track.playing {
+                    self.didSampleListening?(player == .music ? .music : .spotify, date, tick)
+                } else if failed.isEmpty {
+                    self.didSampleListening?(nil, sampledDate, sampledAt)
+                } else {
+                    self.didLoseListeningSample?()
+                }
                 // A brief Automation failure during display lock or wake should not remove the player.
                 if selected == nil, let currentPlayer, failed.contains(currentPlayer),
                    self.track != nil, self.lastSuccessfulSample.duration(to: .now) < .seconds(8) {
@@ -275,7 +286,7 @@ final class Playback: ObservableObject {
                 }
                 self.unavailable = !failed.isEmpty && selected == nil
                 if selected != nil { self.lastSuccessfulSample = .now }
-                self.apply(selected)
+                self.apply(selected.map { ($0.0, $0.1, $0.2) })
             }
         }
     }
