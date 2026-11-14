@@ -21,6 +21,7 @@ struct Track: Decodable {
     let position: Double
     let playing: Bool
     let artworkURL: String
+    var favorited: Bool? = nil
 }
 
 enum PlaybackCommand: String {
@@ -39,6 +40,12 @@ private enum PlayerScript {
         case "toggle": app.playpause(); break;
         case "next": app.nextTrack(); break;
         case "seek": app.playerPosition = Number(argv[3]); break;
+        case "favorite": {
+            const track = app.currentTrack();
+            if (track.persistentID() !== argv[3]) throw new Error("Track changed");
+            track.favorited = !track.favorited();
+            break;
+        }
         case "read": return readTrack(app, argv[2] === "com.spotify.client");
         default: throw new Error("Unknown playback action");
         }
@@ -58,6 +65,7 @@ private enum PlayerScript {
         const id = optional(() => spotify ? track.id() : track.persistentID(), title + artist);
         return JSON.stringify({
             id, title, artist,
+            favorited: spotify ? null : optional(() => track.favorited(), null),
             duration: optional(() => track.duration() / (spotify ? 1000 : 1), 0),
             position: optional(() => app.playerPosition(), 0),
             playing: state === "playing",
@@ -66,9 +74,9 @@ private enum PlayerScript {
     }
     """
 
-    static func run(_ player: Player, path: String, action: String, position: Double? = nil) -> Data? {
+    static func run(_ player: Player, path: String, action: String, argument: String? = nil) -> Data? {
         let arguments = ["-l", "JavaScript", "-e", source, path, action, player.rawValue]
-        return execute(arguments + (position.map { [String($0)] } ?? []))
+        return execute(arguments + (argument.map { [$0] } ?? []))
     }
 
     static func musicArtwork(id: String) -> Data? {
@@ -140,6 +148,8 @@ final class Playback: ObservableObject {
     @Published private(set) var controlError: String?
     let preview: Bool
     var didUpdate: (() -> Void)?
+    var didSampleListening: ((ListeningSource?, Date, ContinuousClock.Instant) -> Void)?
+    var didLoseListeningSample: (() -> Void)?
 
     private let scripts = DispatchQueue(label: "local.notchplayer.playback")
     private var timer: Timer?
@@ -201,7 +211,7 @@ final class Playback: ObservableObject {
         if preview {
             updateDemo(position: target, playing: track.playing)
         } else {
-            perform("seek", position: target)
+            perform("seek", argument: String(target))
         }
     }
 
@@ -226,11 +236,16 @@ final class Playback: ObservableObject {
         didUpdate?()
     }
 
-    private func perform(_ action: String, position: Double? = nil) {
+    func toggleFavorite() {
+        guard !preview, player == .music, let track, track.favorited != nil else { return }
+        perform("favorite", argument: track.id)
+    }
+
+    private func perform(_ action: String, argument: String? = nil) {
         guard let player, let path = player.runningPath else { return }
         controlError = nil
         scripts.async { [weak self] in
-            let success = PlayerScript.run(player, path: path, action: action, position: position) != nil
+            let success = PlayerScript.run(player, path: path, action: action, argument: argument) != nil
             Task { @MainActor in
                 guard let self else { return }
                 if !success, self.player == player { self.controlError = "Couldn’t control \(player.name)." }
@@ -247,7 +262,7 @@ final class Playback: ObservableObject {
             player.runningPath.map { (player, $0) }
         }
         scripts.async { [weak self] in
-            var candidates: [(Player, Track, ContinuousClock.Instant)] = []
+            var candidates: [(Player, Track, ContinuousClock.Instant, Date)] = []
             var failed: Set<Player> = []
             for (player, path) in running {
                 guard let data = PlayerScript.run(player, path: path, action: "read") else {
@@ -256,7 +271,7 @@ final class Playback: ObservableObject {
                 }
                 do {
                     if let track = try JSONDecoder().decode(Track?.self, from: data) {
-                        candidates.append((player, track, .now))
+                        candidates.append((player, track, .now, .now))
                     }
                 } catch {
                     failed.insert(player)
@@ -265,9 +280,18 @@ final class Playback: ObservableObject {
             let active = candidates.filter { $0.1.playing }
             let available = active.isEmpty ? candidates : active
             let selected = available.first { $0.0 == currentPlayer } ?? available.first
+            let sampledAt = ContinuousClock.now
+            let sampledDate = Date.now
             Task { @MainActor in
                 guard let self else { return }
                 self.refreshInFlight = false
+                if let (player, track, tick, date) = selected, track.playing {
+                    self.didSampleListening?(player == .music ? .music : .spotify, date, tick)
+                } else if failed.isEmpty {
+                    self.didSampleListening?(nil, sampledDate, sampledAt)
+                } else {
+                    self.didLoseListeningSample?()
+                }
                 // A brief Automation failure during display lock or wake should not remove the player.
                 if selected == nil, let currentPlayer, failed.contains(currentPlayer),
                    self.track != nil, self.lastSuccessfulSample.duration(to: .now) < .seconds(8) {
@@ -275,7 +299,7 @@ final class Playback: ObservableObject {
                 }
                 self.unavailable = !failed.isEmpty && selected == nil
                 if selected != nil { self.lastSuccessfulSample = .now }
-                self.apply(selected)
+                self.apply(selected.map { ($0.0, $0.1, $0.2) })
             }
         }
     }
