@@ -4,6 +4,7 @@ import SwiftUI
 struct NotchShape: Shape {
     let floating: Bool
     var expansion: CGFloat
+    static let expandedShoulder: CGFloat = 12
 
     var animatableData: CGFloat {
         get { expansion }
@@ -11,9 +12,9 @@ struct NotchShape: Shape {
     }
 
     func path(in rect: CGRect) -> Path {
-        let radius = min(21 + 9 * expansion, rect.height * 0.5)
+        let radius = min(22 + 12 * expansion, rect.height * 0.5)
         if floating { return RoundedRectangle(cornerRadius: radius, style: .continuous).path(in: rect) }
-        let shoulder = 6 + 6 * expansion
+        let shoulder = 6 + (Self.expandedShoulder - 6) * expansion
         let left = shoulder
         let right = rect.maxX - shoulder
         var path = Path()
@@ -37,15 +38,30 @@ final class NotchHover: ObservableObject {
     @Published var isHighlighted = false
 }
 
+final class NotchPages: ObservableObject {
+    @Published var weather = false
+}
+
 struct NotchView: View {
+    static let clockRowHeight: CGFloat = 53
+
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
     @ObservedObject var playback: Playback
     let topHeight: CGFloat
     let floating: Bool
     let expanded: Bool
+    let clockActivities: [ClockActivity]
+    let compactClockFits: Bool
+    let openClock: () -> Void
+    let full: Bool
+    let glass: Bool
+    @ObservedObject var pages: NotchPages
+    let openWeather: () -> Void
+    let toggleFull: () -> Void
     @ObservedObject var hover: NotchHover
     let open: () -> Void
+    let openArtwork: () -> Void
     let dragArtwork: (CGPoint, Bool) -> Void
 
     var body: some View {
@@ -55,10 +71,25 @@ struct NotchView: View {
                 Color.clear
                     .frame(height: topHeight)
                     .accessibilityHidden(true)
+                clockActivityRow
             } else {
                 Button(action: open) {
                     HStack {
-                        if playback.track != nil {
+                        if let activity = clockActivities.first {
+                            if playback.track != nil {
+                                CoverView(playback: playback, size: 18)
+                            } else {
+                                clockSymbol(activity)
+                                    .frame(width: 18)
+                            }
+                            Spacer(minLength: 0)
+                            if compactClockFits {
+                                clockTime(activity, size: 12)
+                            } else if playback.track != nil {
+                                clockSymbol(activity)
+                                    .frame(width: 18)
+                            }
+                        } else if playback.track != nil {
                             CoverView(playback: playback, size: 18)
                             Spacer()
                             Equalizer(playing: playback.track?.playing == true)
@@ -79,24 +110,53 @@ struct NotchView: View {
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("Expand notch player")
+                .accessibilityValue(clockActivities.first?.title ?? "")
                 .transition(.identity)
             }
 
             if expanded {
-                if let track = playback.track {
-                    VStack(spacing: 7) {
+                if pages.weather {
+                    NotchWeather(openWeather: openWeather)
+                        .transition(.opacity)
+                } else if let track = playback.track {
+                    VStack(spacing: 8) {
                         HStack(spacing: 12) {
                             artworkButton
-                            TrackLabels(track: track, source: playback.player?.name)
+                            TrackLabels(track: track, source: playback.player?.name, prominent: true)
+                                .layoutPriority(1)
                             Spacer(minLength: 4)
+                            Button(action: toggleFull) {
+                                Image(systemName: full ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")
+                                    .font(.system(size: 11, weight: .semibold))
+                                    .foregroundStyle(.secondary)
+                                    .frame(width: 28, height: 28)
+                                    .contentShape(Rectangle())
+                            }
+                            .buttonStyle(PlayerButtonStyle())
+                            .help(full ? "Smaller player" : "Larger player")
+                            .accessibilityLabel(full ? "Smaller player" : "Larger player")
                         }
-                        ProgressViewRow(playback: playback, seekable: true)
+                        ProgressViewRow(playback: playback, seekable: true, inline: true)
                             .id((playback.player?.rawValue ?? "") + track.id)
                         PlaybackControls(playback: playback, prominent: true, showsButtonBackgrounds: false)
+                            .frame(maxWidth: .infinity)
+                            .overlay(alignment: .leading) {
+                                if let favorited = track.favorited {
+                                    Button(action: playback.toggleFavorite) {
+                                        Image(systemName: favorited ? "heart.fill" : "heart")
+                                            .font(.system(size: 13, weight: .medium))
+                                            .foregroundStyle(favorited ? Color.pink : .white.opacity(0.85))
+                                            .frame(width: 32, height: 32)
+                                            .contentShape(Rectangle())
+                                    }
+                                    .buttonStyle(PlayerButtonStyle())
+                                    .help(favorited ? "Remove Apple Music favorite" : "Favorite in Apple Music")
+                                    .accessibilityLabel(favorited ? "Remove Apple Music favorite" : "Favorite in Apple Music")
+                                }
+                            }
                     }
-                    .padding(.horizontal, 24)
-                    .padding(.top, 3)
-                    .padding(.bottom, 13)
+                    .padding(.horizontal, 18)
+                    .padding(.top, 7)
                     .transition(.opacity)
                 } else {
                     VStack(spacing: 6) {
@@ -114,9 +174,16 @@ struct NotchView: View {
                     .padding(.bottom, 8)
                     .transition(.opacity)
                 }
+                Spacer(minLength: 0)
+                HStack(spacing: 0) {
+                    pageIndicator(weather: false, label: "Music")
+                    pageIndicator(weather: true, label: "Weather")
+                }
+                .padding(.bottom, 4)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.18), value: pages.weather)
         .clipShape(shape)
         .background { surface(in: shape) }
         .overlay {
@@ -130,14 +197,112 @@ struct NotchView: View {
         .foregroundStyle(.white)
     }
 
-    private func surface(in shape: NotchShape) -> some View {
-        shape.fill(.black)
-            .overlay {
-                if !reduceTransparency {
-                    glassRim(in: shape)
+    private func pageIndicator(weather: Bool, label: String) -> some View {
+        let selected = pages.weather == weather
+        return Button {
+            pages.weather = weather
+        } label: {
+            Capsule()
+                .fill(.white.opacity(selected ? 0.92 : 0.32))
+                .frame(width: 4, height: 4)
+                .frame(width: 18, height: 24)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("\(label) page")
+        .accessibilityAddTraits(selected ? .isSelected : [])
+    }
+
+    private var clockActivityRow: some View {
+        ScrollView(.horizontal) {
+            HStack(spacing: 8) {
+                if clockActivities.isEmpty {
+                    Button(action: openClock) {
+                        HStack(spacing: 9) {
+                            Image(systemName: "timer")
+                                .foregroundStyle(.orange)
+                            Text("Timers & Stopwatch")
+                            Image(systemName: "chevron.right")
+                                .font(.system(size: 9, weight: .semibold))
+                                .foregroundStyle(.secondary)
+                        }
+                        .font(.system(size: 12, weight: .semibold))
+                        .padding(.horizontal, 13)
+                        .frame(height: 39)
+                        .background(.white.opacity(0.09), in: Capsule())
+                    }
+                    .buttonStyle(PlayerButtonStyle())
+                    .accessibilityHint("Opens Clock.")
+                }
+                ForEach(clockActivities) { activity in
+                    Button(action: openClock) {
+                        HStack(spacing: 8) {
+                            clockSymbol(activity)
+                                .frame(width: 27, height: 27)
+                                .background(clockColor(for: activity).opacity(0.14), in: Circle())
+                            Text(activity.title)
+                                .font(.system(size: 12, weight: .semibold))
+                                .lineLimit(1)
+                                .frame(maxWidth: 100)
+                            clockTime(activity, size: 17)
+                        }
+                        .padding(.leading, 6)
+                        .padding(.trailing, 13)
+                        .frame(height: 39)
+                        .background(.white.opacity(0.09), in: Capsule())
+                    }
+                    .buttonStyle(PlayerButtonStyle())
+                    .accessibilityHint(activity.isPaused ? "Paused. Opens Clock." : "Opens Clock.")
                 }
             }
-            .allowsHitTesting(false)
+            .padding(.horizontal, 18)
+        }
+        .scrollIndicators(.never)
+        .frame(height: Self.clockRowHeight)
+    }
+
+    private func clockSymbol(_ activity: ClockActivity) -> some View {
+        Image(systemName: activity.isPaused ? "pause.fill" : activity.kind.symbol)
+            .font(.system(size: 13, weight: .semibold))
+            .foregroundStyle(clockColor(for: activity))
+            .accessibilityHidden(true)
+    }
+
+    private func clockTime(_ activity: ClockActivity, size: CGFloat) -> some View {
+        TimelineView(.periodic(from: .now, by: activity.isPaused ? 3600 : 0.25)) { context in
+            Text(activity.displayTime(at: context.date))
+                .font(.system(size: size, weight: .semibold, design: .rounded))
+                .monospacedDigit()
+                .foregroundStyle(clockColor(for: activity))
+                .lineLimit(1)
+                .fixedSize(horizontal: true, vertical: false)
+        }
+    }
+
+    private func clockColor(for activity: ClockActivity) -> Color {
+        activity.kind == .timer ? .orange : .mint
+    }
+
+    @ViewBuilder
+    private func surface(in shape: NotchShape) -> some View {
+        if glass && !reduceTransparency {
+            #if compiler(>=6.2)
+            if #available(macOS 26.0, *) {
+                Color.clear.glassEffect(.regular.tint(.black.opacity(0.45)), in: shape)
+                    .allowsHitTesting(false)
+            } else {
+                shape.fill(.ultraThinMaterial).overlay { shape.fill(.black.opacity(0.38)) }
+            }
+            #else
+            shape.fill(.ultraThinMaterial).overlay { shape.fill(.black.opacity(0.38)) }
+            #endif
+        } else {
+            shape.fill(.black)
+                .overlay {
+                    if !reduceTransparency { glassRim(in: shape) }
+                }
+                .allowsHitTesting(false)
+        }
     }
 
     @ViewBuilder
@@ -154,14 +319,8 @@ struct NotchView: View {
 
     private var artworkButton: some View {
         let label = "Open \(playback.player?.name ?? "music app")"
-        return Button(action: playback.openPlayer) {
-            CoverView(playback: playback, size: 46)
-                .overlay(alignment: .bottomTrailing) {
-                    Image(systemName: "arrow.up.right")
-                        .font(.system(size: 8, weight: .semibold))
-                        .padding(4)
-                        .background(.black.opacity(0.65), in: UnevenRoundedRectangle(topLeadingRadius: 6))
-                }
+        return Button(action: openArtwork) {
+            CoverView(playback: playback, size: full ? 74 : 46)
         }
         .buttonStyle(PlayerButtonStyle())
         .highPriorityGesture(DragGesture(minimumDistance: 10, coordinateSpace: .global)
@@ -212,16 +371,16 @@ struct LockCard: View {
                     .foregroundStyle(.secondary)
             }
             if let track = playback.track {
-                HStack(spacing: 20) {
-                    VStack(spacing: 10) {
+                HStack(spacing: 44) {
+                    VStack(spacing: 12) {
                         artworkButton
                         controls(for: track)
                     }
-                    .frame(width: artwork.mode == .lyrics ? 270 : nil)
+                    .frame(width: artwork.mode == .lyrics ? artSize : 254)
                     if artwork.mode == .lyrics {
                         LockLyrics(playback: playback, track: track)
                             .id((playback.player?.rawValue ?? "") + track.id)
-                            .background { surface }
+
                     }
                 }
             } else {
@@ -239,6 +398,25 @@ struct LockCard: View {
         }
         .padding(3)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background {
+            if artwork.mode != .record, let image = playback.artwork {
+                GeometryReader { geometry in
+                    Image(nsImage: image)
+                        .resizable()
+                        .scaledToFill()
+                        .frame(width: geometry.size.width * 0.72, height: geometry.size.height * 0.44)
+                        .clipped()
+                        .blur(radius: 44)
+                        .opacity(0.38)
+                        .mask { Ellipse().fill(RadialGradient(colors: [.white, .clear],
+                                                             center: .center, startRadius: 16,
+                                                             endRadius: geometry.size.height * 0.24)) }
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+                }
+                .allowsHitTesting(false)
+                .accessibilityHidden(true)
+            }
+        }
         .preferredColorScheme(.dark)
         .foregroundStyle(.white)
     }
@@ -255,6 +433,10 @@ struct LockCard: View {
                     .transition(.opacity)
             } else {
                 CoverView(playback: playback, size: artSize)
+                    .overlay {
+                        RoundedRectangle(cornerRadius: artSize * 0.16)
+                            .strokeBorder(.white.opacity(0.22))
+                    }
                     .transition(.opacity)
             }
         }
@@ -266,7 +448,8 @@ struct LockCard: View {
     private func controls(for track: Track) -> some View {
         VStack(spacing: 5) {
             HStack(spacing: 10) {
-                TrackLabels(track: track, source: playback.player?.name, prominent: true)
+                RecordView(playback: playback, size: 25)
+                TrackLabels(track: track, source: playback.player?.name)
                 Spacer(minLength: 4)
                 if let player = playback.player {
                     Image(systemName: player == .music ? "music.note" : "waveform")
@@ -277,10 +460,11 @@ struct LockCard: View {
             }
             ProgressViewRow(playback: playback, seekable: true)
                 .id((playback.player?.rawValue ?? "") + track.id)
-            PlaybackControls(playback: playback, prominent: true)
+            PlaybackControls(playback: playback, showsButtonBackgrounds: false)
         }
         .padding(.horizontal, 18)
         .padding(.vertical, 8)
+        .frame(maxWidth: 216)
         .background { surface }
     }
 
@@ -299,9 +483,9 @@ private struct TrackLabels: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 3) {
-            Text(track.title).font(.system(size: prominent ? 15 : 13, weight: .semibold))
+            Text(track.title).font(.system(size: prominent ? 16 : 13, weight: .semibold))
             Text(track.artist.isEmpty ? (source ?? "") : track.artist)
-                .font(.system(size: 11))
+                .font(.system(size: prominent ? 12 : 11))
                 .foregroundStyle(.white.opacity(0.65))
         }
         .lineLimit(1)
@@ -406,7 +590,7 @@ private struct PlaybackControls: View {
     private func control(_ command: PlaybackCommand, _ icon: String, _ label: String) -> some View {
         Button { playback.send(command) } label: {
             Image(systemName: icon)
-                .font(.system(size: prominent ? (command == .toggle ? 20 : 14) : (command == .toggle ? 15 : 11),
+                .font(.system(size: prominent ? (command == .toggle ? 23 : 16) : (command == .toggle ? 15 : 11),
                               weight: .semibold))
                 .frame(width: prominent ? 44 : 26, height: prominent ? 35 : 28)
                 .background {
@@ -430,51 +614,103 @@ private final class ScrubState: ObservableObject {
 private struct ProgressViewRow: View {
     @ObservedObject var playback: Playback
     var seekable = false
+    var inline = false
     @StateObject private var scrub = ScrubState()
 
     var body: some View {
         if let track = playback.track, track.duration.isFinite, track.duration > 0 {
             TimelineView(.periodic(from: .now, by: 0.25)) { _ in
                 let position = scrub.position ?? playback.position()
-                VStack(spacing: seekable ? 2 : 5) {
-                    if seekable {
-                        Slider(value: Binding(
-                            get: { scrub.position ?? playback.position() },
-                            set: { value in
-                                if scrub.position != nil { scrub.position = value }
-                                else { playback.seek(to: value) }
-                            }
-                        ), in: 0...track.duration) {
-                            Text("Playback position")
-                        } onEditingChanged: { editing in
-                            if editing {
-                                scrub.position = playback.position()
-                            } else if let target = scrub.position {
-                                scrub.position = nil
-                                playback.seek(to: target)
-                            }
+                if inline {
+                    VStack(spacing: 2) {
+                        HStack(spacing: 8) {
+                            Text(time(position)).frame(minWidth: 27, alignment: .leading)
+                            inlineScrubber(position: position, duration: track.duration)
+                            Text(time(track.duration)).frame(minWidth: 27, alignment: .trailing)
                         }
-                        .labelsHidden()
-                        .controlSize(.small)
-                        .tint(.white)
-                    } else {
-                        ProgressView(value: position, total: track.duration)
-                            .progressViewStyle(.linear)
-                            .tint(Color(red: 0.74, green: 0.67, blue: 1))
-                            .accessibilityLabel("Playback progress")
+                        .font(.system(size: 9, weight: .medium).monospacedDigit())
+                        .foregroundStyle(.white.opacity(0.62))
+                        if let error = playback.controlError {
+                            Text(error).font(.caption2).foregroundStyle(.orange)
+                        }
                     }
-                    HStack {
-                        Text(time(position))
-                        Spacer()
-                        if seekable, let error = playback.controlError {
-                            Text(error).foregroundStyle(.orange)
+                } else {
+                    VStack(spacing: seekable ? 2 : 5) {
+                        if seekable {
+                            Slider(value: Binding(
+                                get: { scrub.position ?? playback.position() },
+                                set: { value in
+                                    if scrub.position != nil { scrub.position = value }
+                                    else { playback.seek(to: value) }
+                                }
+                            ), in: 0...track.duration) {
+                                Text("Playback position")
+                            } onEditingChanged: { editing in
+                                if editing {
+                                    scrub.position = playback.position()
+                                } else if let target = scrub.position {
+                                    scrub.position = nil
+                                    playback.seek(to: target)
+                                }
+                            }
+                            .labelsHidden()
+                            .controlSize(.small)
+                            .tint(.white)
+                        } else {
+                            ProgressView(value: position, total: track.duration)
+                                .progressViewStyle(.linear)
+                                .tint(Color(red: 0.74, green: 0.67, blue: 1))
+                                .accessibilityLabel("Playback progress")
+                        }
+                        HStack {
+                            Text(time(position))
                             Spacer()
+                            if seekable, let error = playback.controlError {
+                                Text(error).foregroundStyle(.orange)
+                                Spacer()
+                            }
+                            Text(time(track.duration))
                         }
-                        Text(time(track.duration))
+                        .font(.system(size: 9, weight: .medium, design: .monospaced))
+                        .foregroundStyle(.white.opacity(0.58))
                     }
-                    .font(.system(size: 9, weight: .medium, design: .monospaced))
-                    .foregroundStyle(.white.opacity(0.58))
                 }
+            }
+        }
+    }
+
+    private func inlineScrubber(position: Double, duration: Double) -> some View {
+        GeometryReader { geometry in
+            let width = geometry.size.width
+            let fraction = position.isFinite ? min(max(position / duration, 0), 1) : 0
+            ZStack(alignment: .leading) {
+                Capsule().fill(.white.opacity(0.20))
+                Capsule()
+                    .fill(.white.opacity(scrub.position == nil ? 0.74 : 1))
+                    .frame(width: width * fraction)
+            }
+            .frame(height: 3)
+            .frame(maxHeight: .infinity)
+            .contentShape(Rectangle())
+            .gesture(DragGesture(minimumDistance: 0)
+                .onChanged { drag in
+                    guard width > 0 else { return }
+                    scrub.position = min(max(drag.location.x / width, 0), 1) * duration
+                }
+                .onEnded { drag in
+                    scrub.position = nil
+                    guard width > 0 else { return }
+                    playback.seek(to: min(max(drag.location.x / width, 0), 1) * duration)
+                })
+        }
+        .frame(height: 17)
+        .accessibilityLabel("Playback position")
+        .accessibilityValue(time(position))
+        .accessibilityAdjustableAction { direction in
+            switch direction {
+            case .increment: playback.seek(to: min(position + 5, duration))
+            case .decrement: playback.seek(to: max(position - 5, 0))
+            @unknown default: break
             }
         }
     }

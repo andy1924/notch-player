@@ -3,7 +3,7 @@ import ApplicationServices
 
 struct MenuBarClearance: Equatable {
     let compact: Bool
-    let expanded: Bool
+    let expandedWidth: CGFloat
 
     static func measure(pid: pid_t, compact: CGRect, expanded: CGRect) -> Self? {
         let app = AXUIElementCreateApplication(pid)
@@ -35,9 +35,13 @@ struct MenuBarClearance: Equatable {
 
     static func classify(menuItems: [CGRect], compact: CGRect, expanded: CGRect) -> Self {
         let compactZone = compact.insetBy(dx: -4, dy: 0)
-        let expandedZone = expanded.insetBy(dx: -4, dy: 0)
-        return Self(compact: !menuItems.contains { $0.intersects(compactZone) },
-                    expanded: !menuItems.contains { $0.intersects(expandedZone) })
+        let center = expanded.midX
+        let nearestMenu = menuItems
+            .filter { $0.maxY > expanded.minY && $0.minY < expanded.maxY }
+            .map { max(0, max(center - $0.maxX, $0.minX - center)) }
+            .min() ?? expanded.width / 2
+        let compactClear = !menuItems.contains { $0.intersects(compactZone) }
+        return Self(compact: compactClear, expandedWidth: min(expanded.width, floor(nearestMenu * 2)))
     }
 
     private static func attribute(_ name: String, of element: AXUIElement) -> CFTypeRef? {

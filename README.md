@@ -44,6 +44,16 @@ Create an **Apple Development** certificate in **Xcode → Settings → Accounts
 
 Choose **Enable Adaptive Menu Detection** in the menu bar and allow Notch Player under **System Settings → Privacy & Security → Accessibility**. The player uses the foreground app’s menu-item positions to check for overlap. It keeps its usual placement when there’s room. If the menus overlap it, the player animates back behind the camera and returns to the same position when the overlap clears. Without Accessibility access, the player stays attached to the camera and automatic tucking is unavailable.
 
+## Clock timers and stopwatch
+
+Start a timer or stopwatch in macOS Clock. The island shows the next running timer or the stopwatch, and the expanded island shows all active and paused activities. Click an activity to open Clock, or use **Timers & Stopwatch** when there are no active activities. Notch Player reads the local Clock preferences, so activities can remain visible when you switch apps or close the Clock window. Detection depends on the Clock preferences format used by your macOS version.
+
+## Notch appearance, favorites, and weather
+
+Hover for a subtle highlight, then click to reveal the track and playback controls. Use the expand button for a larger player. The menu bar icon offers **Glass Notch** and **Floating Notch**.
+
+Select the second page indicator or swipe left in the open notch to reach **Weather**, then click to open the built-in macOS Weather app. The heart adds or removes an Apple Music favorite through the existing Automation permission.
+
 ## Desktop player and lyrics
 
 Drag the album cover from the expanded notch to a spot on your desktop. Choose **Turntable**, **Sleeve**, or **Aura** under **Desktop Player** in the menu bar. The same menu can show or hide the player.

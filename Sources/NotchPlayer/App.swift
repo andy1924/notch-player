@@ -22,10 +22,27 @@ private class PlayerPanel: NSPanel {
 
 private final class NotchPanel: PlayerPanel {
     var handleCompactClick: (() -> Bool)?
+    var handlePageSwipe: ((Bool) -> Bool)?
+    private var scrollDistance: CGFloat = 0
+    private var didPage = false
 
     override func sendEvent(_ event: NSEvent) {
         // Open on mouse down so a hover resize cannot cancel SwiftUI’s mouse-up action.
         if event.type == .leftMouseDown, handleCompactClick?() == true { return }
+        if event.type == .scrollWheel, event.hasPreciseScrollingDeltas {
+            if event.phase == .began {
+                scrollDistance = 0
+                didPage = false
+            }
+            if event.momentumPhase.isEmpty, event.phase == .changed,
+               abs(event.scrollingDeltaX) > abs(event.scrollingDeltaY) {
+                scrollDistance += event.scrollingDeltaX
+                if !didPage, abs(scrollDistance) >= 38 {
+                    didPage = handlePageSwipe?(scrollDistance < 0) == true
+                }
+                if didPage { return }
+            }
+        }
         super.sendEvent(event)
     }
 }
@@ -76,7 +93,11 @@ private final class AppController: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem?
     private var hoverView: HoverView?
     private var expanded = false
+    private var fullNotch = false
+    private var glassNotch = UserDefaults.standard.bool(forKey: "glassNotch")
+    private var floatingNotch = UserDefaults.standard.bool(forKey: "floatingNotch")
     private let notchHover = NotchHover()
+    private let notchPages = NotchPages()
     private var isLocked = false
     private var screenAwake = true
     private var sessionActive = true
@@ -87,7 +108,6 @@ private final class AppController: NSObject, NSApplicationDelegate {
     private var lockStartedAt: ContinuousClock.Instant?
     private var globalClickMonitor: Any?
     private var localClickMonitor: Any?
-    private lazy var cameraConnector = makeCameraConnector()
     private let menuMeasurements = DispatchQueue(label: "local.notchplayer.menu-geometry", qos: .utility)
     private var menuClearance: MenuBarClearance?
     private var recentMenuClearances: [pid_t: (clearance: MenuBarClearance, sampledAt: ContinuousClock.Instant)] = [:]
@@ -98,9 +118,17 @@ private final class AppController: NSObject, NSApplicationDelegate {
     private let menuLogger = Logger(subsystem: "local.notchplayer.app", category: "menu-clearance")
     private var menuPoll: Timer?
     private var tuckTask: Task<Void, Never>?
+    private var clockReader = ClockActivityReader()
+    private var clockActivities: [ClockActivity] = []
+    private var clockPoll: Timer?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         configure(notch, level: NSWindow.Level(rawValue: NSWindow.Level.statusBar.rawValue + 1))
+        notch.handlePageSwipe = { [weak self] weather in
+            guard let self, self.expanded, self.clockActivities.isEmpty else { return false }
+            self.notchPages.weather = weather
+            return true
+        }
         notch.handleCompactClick = { [weak self] in
             guard let self, !self.expanded, self.menuClearance?.compact != false else { return false }
             self.openNotchFromClick()
@@ -154,6 +182,13 @@ private final class AppController: NSObject, NSApplicationDelegate {
         refreshMenuClearance()
         renderNotch()
         playback.start()
+        refreshClockActivities()
+        let timer = Timer(timeInterval: 0.5, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.refreshClockActivities() }
+        }
+        timer.tolerance = 0.1
+        RunLoop.main.add(timer, forMode: .common)
+        clockPoll = timer
     }
 
     private func makeLockCard(preview: Bool) -> PlayerPanel {
@@ -163,15 +198,6 @@ private final class AppController: NSObject, NSApplicationDelegate {
         configure(panel, level: preview ? .floating : shielding)
         panel.canBecomeVisibleWithoutLogin = !preview
         panel.isReleasedWhenClosed = false
-        return panel
-    }
-
-    private func makeCameraConnector() -> PlayerPanel {
-        let panel = PlayerPanel(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel],
-                                backing: .buffered, defer: false)
-        configure(panel, level: NSWindow.Level(rawValue: NSWindow.Level.statusBar.rawValue + 1))
-        panel.backgroundColor = .black
-        panel.ignoresMouseEvents = true
         return panel
     }
 
@@ -204,6 +230,7 @@ private final class AppController: NSObject, NSApplicationDelegate {
     }
 
     @objc private func frontAppChanged() {
+        if expanded { closeNotch() }
         refreshMenuClearance(force: true)
     }
 
@@ -214,7 +241,7 @@ private final class AppController: NSObject, NSApplicationDelegate {
             menuLogger.notice("Accessibility available: \(access)")
             buildMenu()
         }
-        guard access, !isLocked, sessionActive, screenAwake,
+        guard access, !floatingNotch, !isLocked, sessionActive, screenAwake,
               let screen = preferredScreen, screen.safeAreaInsets.top > 0,
               let frontApp = NSWorkspace.shared.frontmostApplication else {
             measuredApp = nil
@@ -239,7 +266,7 @@ private final class AppController: NSObject, NSApplicationDelegate {
         let menuHeight = screen.safeAreaInsets.top
         let available = screen.frame.width - 24
         let compactWidth = min(camera.width + 80, available)
-        let expandedWidth = min(390, available)
+        let expandedWidth = min(475, available) - 2 * NotchShape.expandedShoulder
         let compact = CGRect(x: camera.center - compactWidth / 2, y: menuTop,
                              width: compactWidth, height: menuHeight)
         let expanded = CGRect(x: camera.center - expandedWidth / 2, y: menuTop,
@@ -295,8 +322,8 @@ private final class AppController: NSObject, NSApplicationDelegate {
     }
 
     private func tuckNotch() {
-        cameraConnector.orderOut(nil)
         expanded = false
+        fullNotch = false
         notchHover.isHighlighted = false
         guard notch.isVisible, let screen = preferredScreen, screen.safeAreaInsets.top > 0,
               !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else {
@@ -325,45 +352,63 @@ private final class AppController: NSObject, NSApplicationDelegate {
         }
     }
 
+    private func refreshClockActivities() {
+        guard systemAwake, screenAwake, sessionActive, !isLocked else { return }
+        let activities = clockReader.read()
+        guard clockActivities != activities else { return }
+        clockActivities = activities
+        renderNotch(animationDuration: 0.2)
+    }
+
+    private func openClock() {
+        guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.apple.clock") else { return }
+        closeNotch()
+        NSWorkspace.shared.openApplication(at: url, configuration: .init())
+    }
+
     private func renderNotch(animationDuration: TimeInterval = 0) {
         guard !isLocked, sessionActive, screenAwake, let screen = preferredScreen else {
             notchHover.isHighlighted = false
-            cameraConnector.orderOut(nil)
             notch.orderOut(nil)
             return
         }
 
-        let floating = screen.safeAreaInsets.top == 0
+        let floating = floatingNotch || screen.safeAreaInsets.top == 0
         if !floating, menuClearance?.compact == false {
-            cameraConnector.orderOut(nil)
             if tuckTask == nil { notch.orderOut(nil) }
             return
         }
-        // Separate the non-interactive camera area from the wide player when menus need the wings.
-        let protectsMenus = !floating && expanded && menuClearance?.expanded == false
-        let level = protectsMenus
-            ? NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.mainMenuWindow)) - 1)
-            : NSWindow.Level(rawValue: NSWindow.Level.statusBar.rawValue + 1)
-        if notch.level != level { notch.level = level }
-        let topHeight = protectsMenus ? 0 : (floating ? 32 : screen.safeAreaInsets.top)
+        let topHeight = floating ? 32 : screen.safeAreaInsets.top
         let camera = cameraGeometry(for: screen)
-        let compactWidth = floating ? 132 : camera.width + 64
+        let clockVisible = !clockActivities.isEmpty
+        let clockFits = clockVisible && (floating || (menuClearance?.expandedWidth ?? 390) >= camera.width + 168)
+        let compactWidth = floating ? (clockVisible ? 166.0 : 132.0) : camera.width + (clockFits ? 144 : 64)
         let hovered = !expanded && notchHover.isHighlighted
-        let width = min(expanded ? 390 : compactWidth + (hovered ? 16 : 0), screen.frame.width - 24)
-        let height = topHeight + (expanded ? 140 : (hovered ? 5 : 0))
-        let top = floating ? screen.visibleFrame.maxY - 5
-            : screen.frame.maxY - (protectsMenus ? screen.safeAreaInsets.top : 0)
-        if protectsMenus {
-            let connectorFrame = tuckedFrame(on: screen)
-            if cameraConnector.frame != connectorFrame { cameraConnector.setFrame(connectorFrame, display: true) }
-            if !cameraConnector.isVisible { cameraConnector.orderFrontRegardless() }
-        } else {
-            cameraConnector.orderOut(nil)
-        }
+        let targetWidth: CGFloat = fullNotch ? 475 : 390
+        let expandedWidth = floating ? targetWidth : min(targetWidth, (menuClearance?.expandedWidth ?? targetWidth) + 2 * NotchShape.expandedShoulder)
+        let width = min(expanded ? expandedWidth : compactWidth + (hovered ? 16 : 0), screen.frame.width - 24)
+        let expandedHeight: CGFloat = (fullNotch ? 190 : 155) + NotchView.clockRowHeight
+        let height = topHeight + (expanded ? expandedHeight : (hovered ? 5 : 0))
+        let top = floating ? screen.visibleFrame.maxY - 5 : screen.frame.maxY
         let center = camera.center
         let frame = CGRect(x: center - width / 2, y: top - height, width: width, height: height)
         let view = NotchView(playback: playback, topHeight: hovered ? height : topHeight, floating: floating,
-                             expanded: expanded, hover: notchHover, open: { [weak self] in self?.openNotchFromClick() },
+                             expanded: expanded, clockActivities: clockActivities, compactClockFits: clockFits,
+                             openClock: { [weak self] in self?.openClock() },
+                             full: fullNotch,
+                             glass: glassNotch, pages: notchPages,
+                             openWeather: { [weak self] in self?.openWeather() },
+                             toggleFull: { [weak self] in
+                                 guard let self else { return }
+                                 self.fullNotch.toggle()
+                                 self.renderNotch(animationDuration: 0.24)
+                             },
+                             hover: notchHover, open: { [weak self] in self?.openNotchFromClick() },
+                             openArtwork: { [weak self] in
+                                 guard let self, !self.playback.preview else { return }
+                                 self.closeNotch()
+                                 self.playback.openPlayer()
+                             },
                              dragArtwork: { [weak self] point, ended in self?.dragArtwork(to: point, ended: ended) })
         if let hoverView {
             hoverView.rootView = view
@@ -401,6 +446,8 @@ private final class AppController: NSObject, NSApplicationDelegate {
     private func closeNotch(animated: Bool = true) {
         notchHover.isHighlighted = false
         expanded = false
+        fullNotch = false
+        notchPages.weather = false
         renderNotch(animationDuration: animated ? 0.26 : 0)
     }
 
@@ -504,12 +551,13 @@ private final class AppController: NSObject, NSApplicationDelegate {
         }
 
         let artwork = preview ? previewArtwork : lockArtwork
-        let width = min(artwork.mode == .lyrics ? 632 : 376, screen.frame.width - 32)
-        let artSize: CGFloat = screen.frame.height >= 820 ? 176 : 122
-        let height = artSize + (preview ? 156 : 136)
+        let width = min(artwork.mode == .lyrics ? 750 : 420, screen.frame.width - 32)
+        let maximumHeight = screen.frame.height * 0.52
+        let artSize = max(64, min(artwork.mode == .record ? 186 : 276, maximumHeight - 155, width * 0.43 + (artwork.mode == .lyrics ? 0 : 90)))
+        let height = min(maximumHeight, artSize + (preview ? 138 : 118))
         let frame = CGRect(x: screen.frame.midX - width / 2, y: screen.frame.midY - height / 2,
                            width: width, height: height)
-        if panel.contentView == nil || panel.frame.height != frame.height {
+        if panel.contentView == nil || panel.frame.size != frame.size {
             let hosting = LockHostingView(rootView: LockCard(playback: playback, preview: preview,
                                                              artSize: artSize, artwork: artwork,
                                                              modeChanged: { [weak self] in self?.updateLockCard() }))
@@ -587,6 +635,7 @@ private final class AppController: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        clockPoll?.invalidate()
         if !playback.preview { listeningRecorder.interrupt() }
     }
 
@@ -643,6 +692,27 @@ private final class AppController: NSObject, NSApplicationDelegate {
         renderNotch(animationDuration: 0.26)
     }
 
+    @objc private func toggleGlassNotch() {
+        glassNotch.toggle()
+        UserDefaults.standard.set(glassNotch, forKey: "glassNotch")
+        renderNotch()
+        buildMenu()
+    }
+
+    @objc private func toggleFloatingNotch() {
+        floatingNotch.toggle()
+        UserDefaults.standard.set(floatingNotch, forKey: "floatingNotch")
+        refreshMenuClearance(force: true)
+        renderNotch(animationDuration: 0.24)
+        buildMenu()
+    }
+
+    private func openWeather() {
+        guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.apple.weather") else { return }
+        closeNotch()
+        NSWorkspace.shared.openApplication(at: url, configuration: .init())
+    }
+
     private func buildMenu() {
         let menu = NSMenu()
         menu.addItem(withTitle: "Show Notch Player", action: #selector(showNotch), keyEquivalent: "")
@@ -655,6 +725,10 @@ private final class AppController: NSObject, NSApplicationDelegate {
             menu.addItem(withTitle: "Enable Adaptive Menu Detection…",
                          action: #selector(enableAdaptiveMenuDetection), keyEquivalent: "")
         }
+        let glass = menu.addItem(withTitle: "Glass Notch", action: #selector(toggleGlassNotch), keyEquivalent: "")
+        glass.state = glassNotch ? .on : .off
+        let floating = menu.addItem(withTitle: "Floating Notch", action: #selector(toggleFloatingNotch), keyEquivalent: "")
+        floating.state = floatingNotch || preferredScreen?.safeAreaInsets.top == 0 ? .on : .off
         menu.items.forEach { $0.target = self }
         let desktop = menu.addItem(withTitle: "Desktop Player", action: nil, keyEquivalent: "")
         let styles = NSMenu()
