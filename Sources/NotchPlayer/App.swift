@@ -21,29 +21,75 @@ private class PlayerPanel: NSPanel {
 }
 
 private final class NotchPanel: PlayerPanel {
+    private(set) var isHandlingPointerSequence = false
+    private var consumesOpeningMouseUp = false
+    var keyboardEnabled = false
+    var toggleMusicPlayback: (() -> Bool)?
+    override var canBecomeKey: Bool { keyboardEnabled }
     var handleCompactClick: (() -> Bool)?
     var handlePageSwipe: ((Bool) -> Bool)?
     private var scrollDistance: CGFloat = 0
+    private var verticalDistance: CGFloat = 0
     private var didPage = false
+    private var lastScrollTimestamp: TimeInterval = 0
 
     override func sendEvent(_ event: NSEvent) {
-        // Open on mouse down so a hover resize cannot cancel SwiftUI’s mouse-up action.
-        if event.type == .leftMouseDown, handleCompactClick?() == true { return }
-        if event.type == .scrollWheel, event.hasPreciseScrollingDeltas {
-            if event.phase == .began {
-                scrollDistance = 0
-                didPage = false
-            }
-            if event.momentumPhase.isEmpty, event.phase == .changed,
-               abs(event.scrollingDeltaX) > abs(event.scrollingDeltaY) {
-                scrollDistance += event.scrollingDeltaX
-                if !didPage, abs(scrollDistance) >= 38 {
-                    didPage = handlePageSwipe?(scrollDistance < 0) == true
-                }
-                if didPage { return }
+        if event.type == .leftMouseDown {
+            isHandlingPointerSequence = true
+            // Expansion creates new controls beneath the pointer. Its opening
+            // gesture must finish before those controls can receive a click.
+            if handleCompactClick?() == true {
+                consumesOpeningMouseUp = true
+                return
             }
         }
+        if event.type == .leftMouseUp {
+            defer { isHandlingPointerSequence = false }
+            if consumesOpeningMouseUp {
+                consumesOpeningMouseUp = false
+                return
+            }
+            super.sendEvent(event)
+            return
+        }
+        if event.type == .scrollWheel, trackPageSwipe(event) { return }
+        if event.type == .keyDown, event.keyCode == 49,
+           event.modifierFlags.intersection([.command, .control, .option, .shift]).isEmpty {
+            if event.isARepeat { return }
+            if toggleMusicPlayback?() == true { return }
+        }
         super.sendEvent(event)
+    }
+
+    @discardableResult
+    func trackPageSwipe(_ event: NSEvent) -> Bool {
+        guard event.momentumPhase.isEmpty else { return false }
+        let phased = !event.phase.isEmpty
+        let began = !event.phase.intersection([.began, .mayBegin]).isEmpty
+        if began || event.timestamp - lastScrollTimestamp > 0.22 {
+            scrollDistance = 0
+            verticalDistance = 0
+            didPage = false
+        }
+        lastScrollTimestamp = event.timestamp
+        if !event.phase.intersection([.cancelled, .ended]).isEmpty {
+            scrollDistance = 0
+            verticalDistance = 0
+            didPage = false
+            return false
+        }
+        guard !phased || !event.phase.intersection([.began, .changed]).isEmpty else { return false }
+        if didPage { return true }
+
+        // Global events can arrive while the nonactivating panel is above another app.
+        let direction: CGFloat = event.isDirectionInvertedFromDevice ? 1 : -1
+        let scale: CGFloat = event.hasPreciseScrollingDeltas ? 1 : 10
+        scrollDistance += event.scrollingDeltaX * direction * scale
+        verticalDistance += abs(event.scrollingDeltaY) * scale
+        if abs(scrollDistance) >= 10, abs(scrollDistance) > verticalDistance * 1.15 {
+            didPage = handlePageSwipe?(scrollDistance < 0) == true
+        }
+        return didPage
     }
 }
 
@@ -66,6 +112,17 @@ private final class HoverView: NSHostingView<NotchView> {
         guard window?.frame.contains(NSEvent.mouseLocation) != true else { return }
         hoverChanged?(false)
     }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        let localPoint = convert(point, from: superview)
+        guard bounds.contains(localPoint) else { return nil }
+        // The glass background is visual-only. Blank space inside the player
+        // still belongs to this window and must absorb the pointer event.
+        return super.hitTest(point) ?? self
+    }
+
+    override func mouseDown(with event: NSEvent) {}
+    override func mouseUp(with event: NSEvent) {}
 
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 }
@@ -106,6 +163,7 @@ private final class AppController: NSObject, NSApplicationDelegate {
     private var lockPoll: Timer?
     private var lockPresentationTask: Task<Void, Never>?
     private var lockStartedAt: ContinuousClock.Instant?
+    private var globalScrollMonitor: Any?
     private var globalClickMonitor: Any?
     private var localClickMonitor: Any?
     private let menuMeasurements = DispatchQueue(label: "local.notchplayer.menu-geometry", qos: .utility)
@@ -118,15 +176,25 @@ private final class AppController: NSObject, NSApplicationDelegate {
     private let menuLogger = Logger(subsystem: "local.notchplayer.app", category: "menu-clearance")
     private var menuPoll: Timer?
     private var tuckTask: Task<Void, Never>?
-    private var clockReader = ClockActivityReader()
+    private let clockReads = DispatchQueue(label: "local.notchplayer.clock-state", qos: .userInitiated)
+    private var clockReadInFlight = false
+    private var pendingStopwatch: (activity: ClockActivity?, expires: Date)?
+    private var clockCommandInFlight = false
     private var clockActivities: [ClockActivity] = []
     private var clockPoll: Timer?
+    private let clockCommands = DispatchQueue(label: "local.notchplayer.clock-controls", qos: .userInitiated)
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         configure(notch, level: NSWindow.Level(rawValue: NSWindow.Level.statusBar.rawValue + 1))
-        notch.handlePageSwipe = { [weak self] weather in
-            guard let self, self.expanded, self.clockActivities.isEmpty else { return false }
-            self.notchPages.weather = weather
+        notch.handlePageSwipe = { [weak self] music in
+            guard let self, !self.clockActivities.isEmpty, self.playback.track != nil else { return false }
+            self.selectMusicPage(music)
+            return true
+        }
+        notch.toggleMusicPlayback = { [weak self] in
+            guard let self, self.expanded, self.notch.isVisible, !self.showingClockPage,
+                  self.playback.track != nil else { return false }
+            self.playback.send(.toggle)
             return true
         }
         notch.handleCompactClick = { [weak self] in
@@ -161,6 +229,13 @@ private final class AppController: NSObject, NSApplicationDelegate {
             let point = NSEvent.mouseLocation
             Task { @MainActor in self?.dismissNotchIfOutside(point) }
         }
+        globalScrollMonitor = NSEvent.addGlobalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
+            let pointer = NSEvent.mouseLocation
+            MainActor.assumeIsolated {
+                guard let self, self.notch.isVisible, self.notch.frame.contains(pointer) else { return }
+                self.notch.trackPageSwipe(event)
+            }
+        }
         localClickMonitor = NSEvent.addLocalMonitorForEvents(matching: outsideClickEvents) { [weak self] event in
             let point = event.window?.convertPoint(toScreen: event.locationInWindow) ?? NSEvent.mouseLocation
             Task { @MainActor in self?.dismissNotchIfOutside(point) }
@@ -177,16 +252,20 @@ private final class AppController: NSObject, NSApplicationDelegate {
         playback.didUpdate = { [weak self] in
             self?.updateLockCard()
             self?.updateDesktop()
+            if let self, !self.clockActivities.isEmpty, self.notchPages.musicSelected,
+               self.playback.track == nil {
+                self.selectMusicPage(false)
+            }
         }
         reconcileLock()
         refreshMenuClearance()
         renderNotch()
         playback.start()
         refreshClockActivities()
-        let timer = Timer(timeInterval: 0.5, repeats: true) { [weak self] _ in
+        let timer = Timer(timeInterval: 0.15, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.refreshClockActivities() }
         }
-        timer.tolerance = 0.1
+        timer.tolerance = 0.03
         RunLoop.main.add(timer, forMode: .common)
         clockPoll = timer
     }
@@ -208,6 +287,7 @@ private final class AppController: NSObject, NSApplicationDelegate {
 
     private func configure(_ panel: NSPanel, level: NSWindow.Level) {
         panel.isOpaque = false
+        panel.ignoresMouseEvents = false
         panel.appearance = NSAppearance(named: .darkAqua)
         panel.backgroundColor = .clear
         panel.hasShadow = false
@@ -230,7 +310,11 @@ private final class AppController: NSObject, NSApplicationDelegate {
     }
 
     @objc private func frontAppChanged() {
-        if expanded { closeNotch() }
+        guard NSWorkspace.shared.frontmostApplication?.processIdentifier != ProcessInfo.processInfo.processIdentifier else { return }
+        if expanded, !notch.isKeyWindow, !notch.isHandlingPointerSequence,
+           !notch.frame.contains(NSEvent.mouseLocation) {
+            closeNotch()
+        }
         refreshMenuClearance(force: true)
     }
 
@@ -353,11 +437,132 @@ private final class AppController: NSObject, NSApplicationDelegate {
     }
 
     private func refreshClockActivities() {
-        guard systemAwake, screenAwake, sessionActive, !isLocked else { return }
-        let activities = clockReader.read()
+        guard systemAwake, screenAwake, sessionActive, !isLocked, !clockReadInFlight,
+              !clockCommandInFlight else { return }
+        clockReadInFlight = true
+        clockReads.async { [weak self] in
+            var reader = ClockActivityReader()
+            let activities = reader.read()
+            Task { @MainActor in
+                guard let self else { return }
+                self.clockReadInFlight = false
+                guard !self.clockCommandInFlight else { return }
+                var resolved = activities
+                if let pending = self.pendingStopwatch {
+                    let actual = activities.first { $0.kind == .stopwatch }
+                    let matches = actual?.isPaused == pending.activity?.isPaused
+                        && (actual == nil) == (pending.activity == nil)
+                    if matches || pending.expires <= .now {
+                        self.pendingStopwatch = nil
+                    } else {
+                        resolved.removeAll { $0.kind == .stopwatch }
+                        if let activity = pending.activity { resolved.append(activity) }
+                    }
+                }
+                self.applyClockActivities(resolved)
+            }
+        }
+    }
+
+    private func applyClockActivities(_ activities: [ClockActivity]) {
         guard clockActivities != activities else { return }
+        if clockActivities.isEmpty || activities.isEmpty { notchPages.musicSelected = false }
         clockActivities = activities
-        renderNotch(animationDuration: 0.2)
+        renderNotch()
+    }
+
+    private var showingClockPage: Bool {
+        !clockActivities.isEmpty && (!notchPages.musicSelected || playback.track == nil)
+    }
+
+    private func selectMusicPage(_ music: Bool) {
+        guard notchPages.musicSelected != music else { return }
+        notchPages.musicSelected = music
+        if !expanded { renderNotch(animationDuration: 0.19) }
+    }
+
+    private func sendStopwatchCommand(_ command: StopwatchCommand) {
+        guard AXIsProcessTrusted() else {
+            notchPages.clockMessage = "Allow Accessibility to control Clock"
+            enableAdaptiveMenuDetection()
+            return
+        }
+        guard let clock = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.clock").first else {
+            notchPages.clockMessage = "Open Stopwatch in Clock to use controls"
+            return
+        }
+        guard !clockCommandInFlight else { return }
+        clockCommandInFlight = true
+        notchPages.clockMessage = nil
+        let activity = clockActivities.first { $0.kind == .stopwatch }
+        clockCommands.async { [weak self] in
+            let pressed = Self.pressStopwatchButton(command, pid: clock.processIdentifier)
+            Task { @MainActor in
+                guard let self else { return }
+                self.clockCommandInFlight = false
+                self.notchPages.clockMessage = pressed ? nil : "Show the Stopwatch tab in Clock"
+                if pressed, let activity, command != .lap {
+                    let updated: ClockActivity?
+                    switch command {
+                    case .reset:
+                        updated = nil
+                    case .stop:
+                        updated = ClockActivity(id: activity.id, kind: .stopwatch, title: activity.title,
+                                                timing: .paused(activity.elapsedTime(at: .now)))
+                    case .start:
+                        updated = ClockActivity(id: activity.id, kind: .stopwatch, title: activity.title,
+                                                timing: .countingUp(since: .now, offset: activity.elapsedTime(at: .now)))
+                    case .lap:
+                        updated = activity
+                    }
+                    self.pendingStopwatch = (updated, Date().addingTimeInterval(3))
+                    var activities = self.clockActivities.filter { $0.kind != .stopwatch }
+                    if let updated { activities.append(updated) }
+                    self.applyClockActivities(activities)
+                }
+                self.refreshClockActivities()
+            }
+        }
+    }
+
+    private nonisolated static func pressStopwatchButton(_ command: StopwatchCommand, pid: pid_t) -> Bool {
+        let clock = AXUIElementCreateApplication(pid)
+        AXUIElementSetMessagingTimeout(clock, 0.12)
+
+        func attribute(_ name: String, of element: AXUIElement) -> CFTypeRef? {
+            var value: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(element, name as CFString, &value) == .success else { return nil }
+            return value
+        }
+
+        for window in attribute(kAXWindowsAttribute, of: clock) as? [AXUIElement] ?? [] {
+            var queue = [window]
+            var index = 0
+            var buttons: [String: AXUIElement] = [:]
+            while index < queue.count, index < 160 {
+                let element = queue[index]
+                index += 1
+                if attribute(kAXRoleAttribute, of: element) as? String == kAXButtonRole {
+                    for key in [kAXTitleAttribute, kAXDescriptionAttribute] {
+                        if let label = attribute(key, of: element) as? String {
+                            buttons[label.lowercased()] = element
+                        }
+                    }
+                }
+                if (buttons["lap"] != nil && buttons["stop"] != nil)
+                    || (buttons["reset"] != nil && buttons["start"] != nil),
+                   let target = buttons[command.rawValue.lowercased()] {
+                    return AXUIElementPerformAction(target, kAXPressAction as CFString) == .success
+                }
+                queue.append(contentsOf: attribute(kAXChildrenAttribute, of: element) as? [AXUIElement] ?? [])
+            }
+            // Require the stopwatch's paired controls before pressing a generic label.
+            guard (buttons["lap"] != nil && buttons["stop"] != nil)
+                || (buttons["reset"] != nil && buttons["start"] != nil),
+                let button = buttons[command.rawValue.lowercased()] else { continue }
+            return AXUIElementPerformAction(button, kAXPressAction as CFString) == .success
+        }
+        return false
     }
 
     private func openClock() {
@@ -378,26 +583,31 @@ private final class AppController: NSObject, NSApplicationDelegate {
             if tuckTask == nil { notch.orderOut(nil) }
             return
         }
+        let shouldCastShadow = glassNotch && expanded && !NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency
+        if notch.hasShadow != shouldCastShadow { notch.hasShadow = shouldCastShadow }
         let topHeight = floating ? 32 : screen.safeAreaInsets.top
         let camera = cameraGeometry(for: screen)
-        let clockVisible = !clockActivities.isEmpty
-        let clockFits = clockVisible && (floating || (menuClearance?.expandedWidth ?? 390) >= camera.width + 168)
-        let compactWidth = floating ? (clockVisible ? 166.0 : 132.0) : camera.width + (clockFits ? 144 : 64)
+        let clockVisible = showingClockPage
+        let compactClearance = menuClearance?.expandedWidth ?? 390
+        let clockWidth = camera.width + 92
+        let clockFits = clockVisible && (floating || compactClearance >= clockWidth)
+        let compactWidth = floating ? 132 : camera.width + (clockFits ? 92 : 64)
         let hovered = !expanded && notchHover.isHighlighted
         let targetWidth: CGFloat = fullNotch ? 475 : 390
-        let expandedWidth = floating ? targetWidth : min(targetWidth, (menuClearance?.expandedWidth ?? targetWidth) + 2 * NotchShape.expandedShoulder)
-        let width = min(expanded ? expandedWidth : compactWidth + (hovered ? 16 : 0), screen.frame.width - 24)
-        let expandedHeight: CGFloat = (fullNotch ? 190 : 155) + NotchView.clockRowHeight
-        let height = topHeight + (expanded ? expandedHeight : (hovered ? 5 : 0))
+        let expandedWidth = floating ? targetWidth : min(targetWidth, compactClearance + 2 * NotchShape.expandedShoulder)
+        let width = min(expanded ? expandedWidth : compactWidth + (hovered && !clockVisible ? 8 : 0), screen.frame.width - 24)
+        let expandedHeight: CGFloat = fullNotch ? 216 : 184
+        let height = topHeight + (expanded ? expandedHeight : (hovered ? 2 : 0))
         let top = floating ? screen.visibleFrame.maxY - 5 : screen.frame.maxY
         let center = camera.center
         let frame = CGRect(x: center - width / 2, y: top - height, width: width, height: height)
         let view = NotchView(playback: playback, topHeight: hovered ? height : topHeight, floating: floating,
                              expanded: expanded, clockActivities: clockActivities, compactClockFits: clockFits,
                              openClock: { [weak self] in self?.openClock() },
+                             selectMusicPage: { [weak self] in self?.selectMusicPage($0) },
+                             stopwatchCommand: { [weak self] in self?.sendStopwatchCommand($0) },
                              full: fullNotch,
                              glass: glassNotch, pages: notchPages,
-                             openWeather: { [weak self] in self?.openWeather() },
                              toggleFull: { [weak self] in
                                  guard let self else { return }
                                  self.fullNotch.toggle()
@@ -419,16 +629,19 @@ private final class AppController: NSObject, NSApplicationDelegate {
             notch.contentView = hosting
             hoverView = hosting
         }
-        if animationDuration > 0, notch.isVisible, !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+        if frame != notch.frame, animationDuration > 0, notch.isVisible, !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
             NSAnimationContext.runAnimationGroup { context in
                 context.duration = animationDuration
                 context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
                 notch.animator().setFrame(frame, display: true)
             }
-        } else {
+        } else if frame != notch.frame {
             notch.setFrame(frame, display: true)
         }
+        if !expanded, notch.isKeyWindow { notch.resignKey() }
+        notch.keyboardEnabled = expanded
         if !notch.isVisible { notch.orderFrontRegardless() }
+        if expanded, !notch.isKeyWindow { notch.makeKey() }
     }
 
     private func setNotchHovered(_ hovered: Bool) {
@@ -447,7 +660,6 @@ private final class AppController: NSObject, NSApplicationDelegate {
         notchHover.isHighlighted = false
         expanded = false
         fullNotch = false
-        notchPages.weather = false
         renderNotch(animationDuration: animated ? 0.26 : 0)
     }
 
@@ -705,12 +917,6 @@ private final class AppController: NSObject, NSApplicationDelegate {
         refreshMenuClearance(force: true)
         renderNotch(animationDuration: 0.24)
         buildMenu()
-    }
-
-    private func openWeather() {
-        guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.apple.weather") else { return }
-        closeNotch()
-        NSWorkspace.shared.openApplication(at: url, configuration: .init())
     }
 
     private func buildMenu() {

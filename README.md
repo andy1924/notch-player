@@ -46,13 +46,11 @@ Choose **Enable Adaptive Menu Detection** in the menu bar and allow Notch Player
 
 ## Clock timers and stopwatch
 
-Start a timer or stopwatch in macOS Clock. The island shows the next running timer or the stopwatch, and the expanded island shows all active and paused activities. Click an activity to open Clock, or use **Timers & Stopwatch** when there are no active activities. Notch Player reads the local Clock preferences, so activities can remain visible when you switch apps or close the Clock window. Detection depends on the Clock preferences format used by your macOS version.
+Start a timer or stopwatch in macOS Clock to see its icon and time in the notch. If music is also available, swipe left to switch to music and right to return to Clock, or use the page indicators in the expanded notch. Use Lap and Stop while running, or Reset and Start while paused. These buttons control the Stopwatch tab in Clock through Accessibility. Reset the stopwatch to clear it. Clock detection uses local preferences and can vary by macOS version.
 
-## Notch appearance, favorites, and weather
+## Notch appearance and favorites
 
-Hover for a subtle highlight, then click to reveal the track and playback controls. Use the expand button for a larger player. The menu bar icon offers **Glass Notch** and **Floating Notch**.
-
-Select the second page indicator or swipe left in the open notch to reach **Weather**, then click to open the built-in macOS Weather app. The heart adds or removes an Apple Music favorite through the existing Automation permission.
+Hover for a subtle highlight, then click to reveal the track and playback controls. The menu bar offers **Glass Notch** and **Floating Notch**. Press Space in the expanded music player to toggle playback. The heart responds immediately and saves the Apple Music favorite through the existing Automation permission.
 
 ## Desktop player and lyrics
 

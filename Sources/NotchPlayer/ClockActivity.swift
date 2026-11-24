@@ -1,4 +1,5 @@
 import Foundation
+import CoreFoundation
 
 struct ClockActivity: Identifiable, Equatable {
     enum Kind {
@@ -24,18 +25,28 @@ struct ClockActivity: Identifiable, Equatable {
         return false
     }
 
-    func displayTime(at date: Date) -> String {
+    func elapsedTime(at date: Date) -> TimeInterval {
         let interval: TimeInterval
         switch timing {
         case .countdown(let deadline): interval = ceil(deadline.timeIntervalSince(date))
-        case .countingUp(let start, let offset): interval = floor(date.timeIntervalSince(start) + offset)
-        case .paused(let seconds): interval = kind == .timer ? ceil(seconds) : floor(seconds)
+        case .countingUp(let start, let offset): interval = date.timeIntervalSince(start) + offset
+        case .paused(let seconds): interval = kind == .timer ? ceil(seconds) : seconds
         }
+        return min(max(interval, 0), Double(Int32.max))
+    }
+
+    func displayTime(at date: Date, precise: Bool = false) -> String {
+        let interval = elapsedTime(at: date)
         let seconds = Int(min(max(interval, 0), Double(Int32.max)))
         if seconds >= 3600 {
             return String(format: "%d:%02d:%02d", seconds / 3600, seconds / 60 % 60, seconds % 60)
         }
-        return String(format: "%02d:%02d", seconds / 60, seconds % 60)
+        let base = String(format: "%02d:%02d", seconds / 60, seconds % 60)
+        if precise, kind == .stopwatch {
+            let hundredths = Int((interval * 100).rounded(.down)) % 100
+            return base + String(format: ".%02d", hundredths)
+        }
+        return base
     }
 
     func isActive(at date: Date) -> Bool {
@@ -52,7 +63,17 @@ struct ClockActivityReader {
     private var activities: [ClockActivity] = []
 
     mutating func read(at now: Date = Date()) -> [ClockActivity] {
-        guard let data = try? Data(contentsOf: store) else {
+        let domain = "com.apple.mobiletimerd" as CFString
+        CFPreferencesAppSynchronize(domain)
+        var root: [String: Any] = [:]
+        for key in ["MTTimers", "MTStopwatches"] {
+            if let value = CFPreferencesCopyAppValue(key as CFString, domain) {
+                root[key] = value
+            }
+        }
+        let preferences = root.isEmpty ? nil : try? PropertyListSerialization.data(
+            fromPropertyList: root, format: .binary, options: 0)
+        guard let data = preferences ?? (try? Data(contentsOf: store)) else {
             lastData = nil
             activities = []
             return []
@@ -119,8 +140,11 @@ struct ClockActivityReader {
 
     private static func stopwatch(_ record: Record) -> ClockActivity? {
         guard let id = record["MTStopwatchIdentifier"] as? String else { return nil }
-        let offset = record["MTStopwatchOffset"] as? Double ?? 0
-        guard offset.isFinite, offset >= 0 else { return nil }
+        let lapOffset = record["MTStopwatchOffset"] as? Double ?? 0
+        let lapsTotal = record["MTStopwatchPreviousLapsTotalInterval"] as? Double ?? 0
+        let offset = lapOffset + lapsTotal
+        guard lapOffset.isFinite, lapOffset >= 0, lapsTotal.isFinite, lapsTotal >= 0,
+              offset.isFinite else { return nil }
         let timing: ClockActivity.Timing
         switch record["MTStopwatchState"] as? Int {
         case 2:
@@ -132,4 +156,11 @@ struct ClockActivityReader {
         }
         return ClockActivity(id: "stopwatch-" + id, kind: .stopwatch, title: "Stopwatch", timing: timing)
     }
+}
+
+enum StopwatchCommand: String {
+    case lap = "Lap"
+    case stop = "Stop"
+    case start = "Start"
+    case reset = "Reset"
 }
