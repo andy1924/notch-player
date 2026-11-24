@@ -41,9 +41,10 @@ private enum PlayerScript {
         case "next": app.nextTrack(); break;
         case "seek": app.playerPosition = Number(argv[3]); break;
         case "favorite": {
+            const requested = JSON.parse(argv[3]);
             const track = app.currentTrack();
-            if (track.persistentID() !== argv[3]) throw new Error("Track changed");
-            track.favorited = !track.favorited();
+            if (track.persistentID() !== requested.id) throw new Error("Track changed");
+            track.favorited = requested.value;
             break;
         }
         case "read": return readTrack(app, argv[2] === "com.spotify.client");
@@ -151,6 +152,16 @@ final class Playback: ObservableObject {
     var didSampleListening: ((ListeningSource?, Date, ContinuousClock.Instant) -> Void)?
     var didLoseListeningSample: (() -> Void)?
 
+    private struct FavoriteChange {
+        let token: UUID
+        let trackID: String
+        let value: Bool
+        let previousValue: Bool
+        let expires: Date
+        var completed = false
+    }
+    private var favoriteChange: FavoriteChange?
+
     private let scripts = DispatchQueue(label: "local.notchplayer.playback")
     private var timer: Timer?
     private var refreshInFlight = false
@@ -237,8 +248,35 @@ final class Playback: ObservableObject {
     }
 
     func toggleFavorite() {
-        guard !preview, player == .music, let track, track.favorited != nil else { return }
-        perform("favorite", argument: track.id)
+        guard !preview, player == .music, let track, let previous = track.favorited,
+              let path = Player.music.runningPath else { return }
+        let change = FavoriteChange(token: UUID(), trackID: track.id, value: !previous,
+                                    previousValue: previous, expires: Date().addingTimeInterval(6))
+        guard let data = try? JSONSerialization.data(withJSONObject: ["id": track.id, "value": change.value]),
+              let argument = String(data: data, encoding: .utf8) else { return }
+        favoriteChange = change
+        controlError = nil
+        var updated = track
+        updated.favorited = change.value
+        self.track = updated
+
+        scripts.async { [weak self] in
+            let success = PlayerScript.run(.music, path: path, action: "favorite", argument: argument) != nil
+            Task { @MainActor in
+                guard let self, self.favoriteChange?.token == change.token else { return }
+                if success {
+                    self.favoriteChange?.completed = true
+                } else {
+                    self.favoriteChange = nil
+                    if self.player == .music, var current = self.track, current.id == change.trackID {
+                        current.favorited = change.previousValue
+                        self.track = current
+                        self.controlError = "Couldn’t update the Apple Music favorite."
+                    }
+                }
+                self.refresh()
+            }
+        }
     }
 
     private func perform(_ action: String, argument: String? = nil) {
@@ -308,7 +346,20 @@ final class Playback: ObservableObject {
         let changed = player != selection?.0 || track?.id != selection?.1.id
             || track?.artworkURL != selection?.1.artworkURL
         player = selection?.0
-        track = selection?.1
+        var selectedTrack = selection?.1
+        if let change = favoriteChange {
+            if selection?.0 != .music || selectedTrack?.id != change.trackID {
+                favoriteChange = nil
+            } else if change.completed, selectedTrack?.favorited == change.value {
+                favoriteChange = nil
+            } else if change.expires <= .now {
+                favoriteChange = nil
+                controlError = "Couldn’t confirm the Apple Music favorite."
+            } else {
+                selectedTrack?.favorited = change.value
+            }
+        }
+        track = selectedTrack
         sampledAt = selection?.2 ?? .now
         if changed {
             controlError = nil
