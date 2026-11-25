@@ -18,8 +18,8 @@ struct Track: Decodable {
     let title: String
     let artist: String
     let duration: Double
-    let position: Double
-    let playing: Bool
+    var position: Double
+    var playing: Bool
     let artworkURL: String
     var favorited: Bool? = nil
 }
@@ -38,6 +38,8 @@ private enum PlayerScript {
         switch (argv[1]) {
         case "previous": app.previousTrack(); break;
         case "toggle": app.playpause(); break;
+        case "play": app.play(); break;
+        case "pause": app.pause(); break;
         case "next": app.nextTrack(); break;
         case "seek": app.playerPosition = Number(argv[3]); break;
         case "favorite": {
@@ -161,6 +163,7 @@ final class Playback: ObservableObject {
         var completed = false
     }
     private var favoriteChange: FavoriteChange?
+    private var playingChange: (value: Bool, expires: Date)?
 
     private let scripts = DispatchQueue(label: "local.notchplayer.playback")
     private var timer: Timer?
@@ -213,7 +216,18 @@ final class Playback: ObservableObject {
             }
             return
         }
-        perform(command.rawValue)
+        guard command == .toggle, var current = track else {
+            perform(command.rawValue)
+            return
+        }
+        // Show the new state at once and send an explicit play or pause, so a slow
+        // script or a repeated click cannot leave the button out of step.
+        current.position = position()
+        current.playing.toggle()
+        sampledAt = .now
+        track = current
+        playingChange = (current.playing, Date.now.addingTimeInterval(4))
+        perform(current.playing ? "play" : "pause")
     }
 
     func seek(to position: Double) {
@@ -286,7 +300,10 @@ final class Playback: ObservableObject {
             let success = PlayerScript.run(player, path: path, action: action, argument: argument) != nil
             Task { @MainActor in
                 guard let self else { return }
-                if !success, self.player == player { self.controlError = "Couldn’t control \(player.name)." }
+                if !success {
+                    self.playingChange = nil
+                    if self.player == player { self.controlError = "Couldn’t control \(player.name)." }
+                }
                 self.refresh()
             }
         }
@@ -357,6 +374,13 @@ final class Playback: ObservableObject {
                 controlError = "Couldn’t confirm the Apple Music favorite."
             } else {
                 selectedTrack?.favorited = change.value
+            }
+        }
+        if let change = playingChange {
+            if selectedTrack == nil || selectedTrack?.playing == change.value || change.expires <= .now {
+                playingChange = nil
+            } else {
+                selectedTrack?.playing = change.value
             }
         }
         track = selectedTrack
