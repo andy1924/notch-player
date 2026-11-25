@@ -349,7 +349,7 @@ private final class AppController: NSObject, NSApplicationDelegate {
         let menuTop = mainTop - screen.frame.maxY
         let menuHeight = screen.safeAreaInsets.top
         let available = screen.frame.width - 24
-        let compactWidth = min(camera.width + 80, available)
+        let compactWidth = min(camera.width + 90, available)
         let expandedWidth = min(475, available) - 2 * NotchShape.expandedShoulder
         let compact = CGRect(x: camera.center - compactWidth / 2, y: menuTop,
                              width: compactWidth, height: menuHeight)
@@ -589,9 +589,9 @@ private final class AppController: NSObject, NSApplicationDelegate {
         let camera = cameraGeometry(for: screen)
         let clockVisible = showingClockPage
         let compactClearance = menuClearance?.expandedWidth ?? 390
-        let clockWidth = camera.width + 92
+        let clockWidth = camera.width + 102
         let clockFits = clockVisible && (floating || compactClearance >= clockWidth)
-        let compactWidth = floating ? 132 : camera.width + (clockFits ? 92 : 64)
+        let compactWidth = floating ? 132 : camera.width + (clockFits ? 102 : 74)
         let hovered = !expanded && notchHover.isHighlighted
         let targetWidth: CGFloat = fullNotch ? 475 : 390
         let expandedWidth = floating ? targetWidth : min(targetWidth, compactClearance + 2 * NotchShape.expandedShoulder)

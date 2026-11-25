@@ -119,7 +119,7 @@ struct NotchView: View {
                             Color.clear
                         }
                     }
-                    .padding(.horizontal, 11)
+                    .padding(.horizontal, 16)
                     .frame(maxWidth: .infinity)
                     .frame(height: topHeight)
                     .contentShape(Rectangle())
